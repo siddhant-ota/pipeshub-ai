@@ -1,0 +1,41 @@
+# Contract-test suite: the MCP (Model Context Protocol) endpoint.
+# Routes: backend/nodejs/apps/src/modules/mcp/routes/mcp.routes.ts
+# The spec puts both operations at the root of the server, not under /api/v1.
+# They take no ID, so the suite has no fixtures.
+#
+# The route hands every request to the Streamable HTTP transport of the MCP SDK
+# (mcp.controller.ts), and the transport looks at the `Accept` header before it
+# reads anything else. The spec declares no such header.
+
+name: mcp
+
+include_path_regex: "^/mcp(/|$)"
+
+# `POST /mcp` gets the `Accept` that an MCP client sends; without it the
+# transport answers 406 to every request. `GET /mcp` gets none: see below.
+headers:
+  handleMCPRequest:
+    Accept: mcp.accept
+
+values:
+  # Gap in the spec that this value hides: `method` has no list of values, so
+  # Schemathesis sends "". The server answers that with HTTP 200 and a JSON-RPC
+  # error ("Method not found"). `ping` gets a JSON-RPC result. The SDK answers it
+  # itself: it calls no tool and no PipesHub API. No generated request can call a
+  # tool, because none has the method `tools/call`.
+  body.method: mcp.method
+
+constants:
+  mcp.accept: application/json, text/event-stream
+  mcp.method: ping
+
+client_chosen_ids:
+  - field: body.id
+    reason: The JSON-RPC request ID. The client makes it up; the response repeats it.
+
+no_success_response:
+  - operation: handleMCPStreamingRequest
+    reason: >-
+      The transport answers 406 unless `Accept` lists `text/event-stream`. With it,
+      the server opens an event stream that it never ends, and the request would
+      hang until the timeout. So the suite gives this operation no `Accept` header.
