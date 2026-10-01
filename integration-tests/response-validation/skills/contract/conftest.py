@@ -38,9 +38,11 @@ PLAIN_ROLES = (
     "patchable",
     "deprecatable",
     "enabled",
-    "disposable",
     "resourceWritable",
 )
+# One skill for each request of `deleteSkill` in the plan. A request can delete its skill
+# without being a valid one (see `deleteSkill` in suite.yaml), and the next one needs another.
+DISPOSABLE_ROLES = tuple(f"disposable{number}" for number in range(1, 8))
 VERSIONED_ROLES = ("versioned", "rollbackable")
 RESOURCE_ROLES = ("resourceReadable", "resourceRemovable")
 DISABLED = "disabled"
@@ -78,9 +80,14 @@ def _delete_named(client: SessionClient, prefixes: tuple[str, ...]) -> None:
     """Delete the skills of the test user whose name starts with one of `prefixes`."""
     try:
         resp = client.request("GET", SKILLS)
-        skills = (resp.json().get("skills") or []) if resp.status_code == 200 else []
+        skills = resp.json().get("skills") if resp.status_code == 200 else None
     except Exception as exc:  # noqa: BLE001 - a teardown must not stop the ones after it
         logger.warning("Could not list the skills to delete: %s", exc)
+        return
+    if not isinstance(skills, list):
+        logger.warning(
+            "Could not list the skills to delete: HTTP %s %s", resp.status_code, resp.text[:200]
+        )
         return
     for skill in skills:
         name = skill.get("name") if isinstance(skill, dict) else None
@@ -107,6 +114,12 @@ def _skills(client: SessionClient, roles: tuple[str, ...]) -> Iterator[dict[str,
 def contract_skills(user_session_client: SessionClient) -> Iterator[dict[str, str]]:
     with _skills(user_session_client, PLAIN_ROLES) as names:
         yield names
+
+
+@pytest.fixture(scope="module")
+def contract_disposable_skills(user_session_client: SessionClient) -> Iterator[list[str]]:
+    with _skills(user_session_client, DISPOSABLE_ROLES) as names:
+        yield list(names.values())
 
 
 @pytest.fixture(scope="module")
@@ -195,15 +208,25 @@ def contract_skill_archive(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return path
 
 
+# The API calls the embedding model of the deployment once for each new skill (see suite.yaml).
+_EMBEDS = "Calls to the embedding model: {}."
+
 # unit/test_contract_fixtures.py checks that these keys cover every key suite.yaml uses.
 VALUE_SOURCES: tuple[ValueSource, ...] = (
     ValueSource(
         "contract_skills",
         (*(f"skill.{role}.name" for role in PLAIN_ROLES), "skill.patchable.marker"),
         lambda names: (*(names[role] for role in PLAIN_ROLES), PATCH_MARKER),
-        "Seven skills of the test user: to read, to update, to patch the body of, to deprecate, "
-        "to disable, to delete, and to write a bundled resource to. The marker is a text that "
-        "the body of each has exactly once.",
+        "Six skills of the test user: to read, to update, to patch the body of, to deprecate, "
+        "to disable, and to write a bundled resource to. The marker is a text that the body of "
+        f"each has exactly once. {_EMBEDS.format(6)}",
+    ),
+    ValueSource(
+        "contract_disposable_skills",
+        ("skill.disposable.name",),
+        lambda names: (names,),
+        "Seven skills of the test user to delete, one for each request of the delete operation. "
+        f"{_EMBEDS.format(7)}",
     ),
     ValueSource(
         "contract_versioned_skills",
@@ -212,7 +235,7 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
             skills[role][what] for role in VERSIONED_ROLES for what in ("name", "version")
         ),
         "Two skills that were updated once, so each has one archived version: one to read the "
-        "versions of, and one to roll back.",
+        f"versions of, and one to roll back. {_EMBEDS.format(2)}",
     ),
     ValueSource(
         "contract_skills_with_resource",
@@ -221,13 +244,13 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
             value for role in RESOURCE_ROLES for value in (names[role], RESOURCE_PATH)
         ),
         "Two skills with one bundled resource each, at the given path: one to read the resource "
-        "of, and one to remove it from.",
+        f"of, and one to remove it from. {_EMBEDS.format(2)}",
     ),
     ValueSource(
         "contract_disabled_skill",
         ("skill.disabled.name",),
         lambda name: (name,),
-        "One skill that is already disabled, for the enable operation.",
+        f"One skill that is already disabled, for the enable operation. {_EMBEDS.format(1)}",
     ),
     ValueSource(
         "contract_new_skill_names",
@@ -235,7 +258,9 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         lambda names: (names["created"], names["imported"], _skill_md(names["imported"])),
         "Creates nothing. A name for each skill that the create operation makes, and a name and "
         "the SKILL.md text for each skill that the import makes; `{case}` is the number of the "
-        "request. At the end it deletes the skills of the test user that still have these names.",
+        "request. At the end it deletes the skills of the test user that still have these names. "
+        "The operations create up to 43 skills (30 and 13), and the API calls the embedding model "
+        "once for each.",
     ),
     ValueSource(
         "contract_skill_archive",

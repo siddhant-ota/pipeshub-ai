@@ -3,6 +3,20 @@
 # Every handler forwards to the query service: backend/python/app/api/routes/skills.py
 # The keys on the right-hand side (`skill.mutable.name`, ...) are produced
 # by `contract_values` in conftest.py.
+#
+# What a run does to the deployment beyond the skills that it creates and deletes:
+# - It calls the embedding model of the deployment, about 65 times with one short text
+#   each: 18 fixture skills, up to 30 skills from `createSkill`, 13 from
+#   `finalizeSkillImport`, about 4 texts from `updateSkill`. Every skills route builds a
+#   SkillManager that embeds each skill text which the cache of the process does not
+#   have, and each create and update embeds the new text (api/routes/skills.py
+#   `_build_manager`, agents/agent_loop/skills/semantic_index.py). With a hosted
+#   embedding model these are calls to its provider. The cost is accepted.
+# - About 40 documents stay in `agentSkillVersions`. Each update, body patch, deprecate
+#   and rollback archives the version it replaces, the delete of a skill keeps its
+#   versions (graph_store.py `delete_skill`), and no API call removes them.
+# - `GET /skills` writes the built-in skills into the organization, if they are not
+#   there yet or are older than the ones of the deployment (`sync_builtin_skills`).
 
 name: skills
 
@@ -14,8 +28,8 @@ include_path_regex: "^/skills(/|$)"
 # `readonly` is only read, `mutable` is updated, `patchable` has the marker text in
 # its body, `deprecatable` is deprecated, `enabled` is disabled by the disable
 # operation, `disabled` already is, for the enable operation, `versioned` and
-# `rollbackable` have one archived version, `disposable` is deleted by the DELETE
-# operation, and the three `resource...` skills are for the bundled-resource
+# `rollbackable` have one archived version, `disposable` is a pool of skills for the
+# DELETE operation, and the three `resource...` skills are for the bundled-resource
 # operations.
 path_parameters:
   defaults:
@@ -26,8 +40,14 @@ path_parameters:
         candidateId: skillCandidate.unknownId
 
   operations:
+    # A valid update with a new description calls the embedding model.
     updateSkill:
       name: skill.mutable.name
+    # A pool: each request takes the next skill. The first request is the invalid
+    # `?detach=null&detach=null`. Node forwards a repeated parameter as `detach[]`,
+    # the query service does not know that name, uses `detach=false` and deletes the
+    # skill. The run reports that as a difference, and it is one. With one skill only,
+    # the two valid requests after it would find nothing to delete.
     deleteSkill:
       name: skill.disposable.name
     patchSkillBody:
@@ -60,12 +80,14 @@ values_by_operation:
   # Hidden: the spec has no pattern and no length for `name`, and Schemathesis sends
   # "". The API takes lowercase letters, digits and single hyphens, 64 characters at
   # most (skills/validator.py).
+  # Each of the 30 valid requests creates a skill, and so calls the embedding model.
   createSkill:
     body.name: skill.created.name
   # `content` is a whole SKILL.md file, with the name of the skill in it. `name`
   # renames the imported skill; it gets the name that the file already has. Both
   # values have `{case}`, and one request gets one number, so they agree.
   # Hidden: the spec allows any text as `content`, and any text as `name`.
+  # Each of the 13 valid requests creates a skill, and so calls the embedding model.
   finalizeSkillImport:
     body.content: skill.imported.content
     body.name: skill.imported.name
@@ -78,6 +100,8 @@ values_by_operation:
   patchSkillBody:
     body.old_string: skill.patchable.marker
     body.new_string: skill.patchable.marker
+  # Hidden: the spec allows any text of one character or more as `version`. The API
+  # answers 404 for a version that the skill does not have.
   rollbackSkill:
     body.version: skill.rollbackable.version
   # Hidden: the spec has no `minLength` for `path`, and the API wants one character.
