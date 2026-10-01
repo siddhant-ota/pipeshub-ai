@@ -58,9 +58,14 @@ _COMPLETED_EXIT_CODES = (0, 1)
 # `stop_reason` of a run in which every selected operation went through every phase.
 _RAN_TO_THE_END = "completed"
 _PLACEHOLDER = "0" * 24
-# For a value that goes where the spec wants a UUID; the other placeholder would make
-# every valid case of that operation an invalid one in the plan.
-_UUID_PLACEHOLDER = "00000000-0000-4000-8000-000000000000"
+# For a value that goes where the spec gives a format; the plain placeholder there would make
+# every valid case of the operation an invalid one in the plan.
+_PLACEHOLDER_BY_FORMAT = {
+    "uuid": "00000000-0000-4000-8000-000000000000",
+    "email": "contract-placeholder@example.com",
+    "uri": "https://contract-placeholder.example.com/",
+    "date-time": "2000-01-01T00:00:00Z",
+}
 
 
 class RunnerError(Exception):
@@ -306,7 +311,7 @@ def plan(
     values = ContractValues(
         values={
             **{
-                key: _UUID_PLACEHOLDER if key in suite.uuid_keys else _PLACEHOLDER
+                key: _PLACEHOLDER_BY_FORMAT.get(suite.key_formats.get(key, ""), _PLACEHOLDER)
                 for key in suite.fixture_keys
             },
             **suite.constants,

@@ -14,7 +14,6 @@ from typing import Any
 import yaml
 
 from helper.contract.fields import (
-    UUID_FORMAT,
     enumerated_path_parameters,
     path_parameter_formats,
     request_fields,
@@ -117,8 +116,9 @@ class Suite:
     rate_limit: str = ""
     # value key -> a value that the suite file itself gives
     constants: dict[str, Value] = field(default_factory=dict)
-    # Value keys that go where the spec wants a UUID, so that a plan can use one in their place.
-    uuid_keys: frozenset[str] = frozenset()
+    # value key -> the `format` that the spec gives a field it goes into (`uuid`, `email`, ...),
+    # so that a plan can put a value of that form in its place.
+    key_formats: dict[str, str] = field(default_factory=dict)
 
     @property
     def value_keys(self) -> set[str]:
@@ -240,7 +240,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
         )
 
     seen_fields: set[str] = set()
-    uuid_keys: set[str] = set()
+    key_formats: dict[str, str] = {}
     planned: list[PlannedOperation] = []
     for operation in in_scope:
         operation_id = operation.operation_id
@@ -291,10 +291,10 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
             **{request_field.name: request_field.format for request_field in fields},
             **path_parameter_formats(spec, operation),
         }
-        uuid_keys.update(
-            key
+        key_formats.update(
+            (key, formats[name])
             for name, key in {**field_values, **path_values}.items()
-            if formats.get(name) == UUID_FORMAT
+            if formats.get(name)
         )
 
         planned.append(
@@ -362,5 +362,5 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
         api_prefix=prefixes[0] if prefixes else "",
         rate_limit=str(raw.get("rate_limit") or ""),
         constants=dict(raw.get("constants") or {}),
-        uuid_keys=frozenset(uuid_keys),
+        key_formats=key_formats,
     )

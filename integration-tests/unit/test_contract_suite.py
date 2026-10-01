@@ -467,7 +467,7 @@ def test_a_file_of_a_multipart_body_gets_a_file(
     assert planned.file_fields == (name,)
     assert planned.field_values == {"body.folderId": "folder.id", name: "file.path"}
     # The path parameter is a UUID in the spec, so a plan must put a UUID there.
-    assert suite.uuid_keys == {"file.id"}
+    assert suite.key_formats["file.id"] == "uuid"
 
 
 def test_a_header_for_an_operation(tmp_path: Path) -> None:

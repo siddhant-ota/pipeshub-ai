@@ -37,7 +37,6 @@ _STRUCTURED_BODIES = (
 )
 _REF = "$ref"
 FILE_FORMAT = "binary"
-UUID_FORMAT = "uuid"
 
 
 @dataclass(frozen=True)
