@@ -1,0 +1,82 @@
+# Contract-test suite: access tokens (personal access tokens, service accounts
+# and the service tokens they hold).
+# Routes: backend/nodejs/apps/src/modules/oauth_provider/routes/pat.routes.ts
+#         backend/nodejs/apps/src/modules/oauth_provider/routes/service-token.routes.ts
+#         backend/nodejs/apps/src/modules/user_management/routes/service-accounts.routes.ts
+# The keys on the right-hand side (`serviceAccount.mutable.id`, ...) are
+# produced by `contract_values` in conftest.py.
+
+name: access-tokens
+
+include_path_regex: "^/(personal-access-tokens|service-accounts|service-tokens)(/|$)"
+
+# Each of the three routers has its own limiter for each user:
+# MAX_OAUTH_CLIENT_REQUESTS_PER_MINUTE, 1,000 by default
+# (createOAuthClientRateLimiter, tokens_manager/config/config.ts).
+# The fixtures and the cleanup count against it too.
+rate_limit: 300/m
+
+# Roles keep the operations apart, in whatever order they run: `readonly` is
+# only read, `mutable` is updated, and `disposable` is deleted or revoked by
+# the DELETE operation under test. The admin revocation has its own token.
+path_parameters:
+  defaults:
+    - path_prefix: /service-accounts
+      values:
+        id: serviceAccount.readonly.id
+
+  operations:
+    revokePersonalAccessToken:
+      tokenId: personalAccessToken.disposable.id
+    adminRevokePersonalAccessToken:
+      tokenId: personalAccessToken.adminDisposable.id
+    updateServiceAccount:
+      id: serviceAccount.mutable.id
+    deleteServiceAccount:
+      id: serviceAccount.disposable.id
+    revokeServiceToken:
+      tokenId: serviceToken.disposable.id
+
+# The service tokens of this suite all belong to the `readonly` service
+# account: its record is never changed, only the tokens it holds.
+values:
+  query.serviceAccountId: serviceAccount.readonly.id
+  body.serviceAccountId: serviceAccount.readonly.id
+  # The API accepts only scopes that the deployment allows (MCP_SCOPES); a
+  # random string is answered with 400. The value hides that the spec allows
+  # any text as a scope.
+  body.scopes[*]: scope.name
+  # A slug that an account already has is answered with 409, also when an
+  # earlier run that stopped early left the account behind. This value is new
+  # in each run and in each request, so every valid createServiceAccount can
+  # succeed. It hides the shortest and the longest slug that the spec allows
+  # (3 and 48 characters): no valid request is sent with them.
+  body.slug: serviceAccount.created.slug
+
+constants:
+  scope.name: openid
+
+# An empty list says nothing about the schema of its items.
+requires:
+  listPersonalAccessTokens:
+    - personalAccessToken.readonly.id
+  adminListPersonalAccessTokens:
+    - personalAccessToken.readonly.id
+  listServiceAccounts:
+    - serviceAccount.readonly.id
+  listServiceTokens:
+    - serviceToken.readonly.id
+
+# The response of createPersonalAccessToken and of createServiceToken has the
+# raw token, in `token.accessToken`. The library masks it in the files of a
+# run, and the tokens are revoked at the end of the run.
+created_resources:
+  - operation: createPersonalAccessToken
+    id_pointer: /token/id
+    delete_path: /personal-access-tokens/{id}
+  - operation: createServiceAccount
+    id_pointer: /id
+    delete_path: /service-accounts/{id}
+  - operation: createServiceToken
+    id_pointer: /token/id
+    delete_path: /service-tokens/{id}?serviceAccountId={serviceAccount.readonly.id}
