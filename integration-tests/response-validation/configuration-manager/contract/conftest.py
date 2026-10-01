@@ -36,6 +36,8 @@ _BASE = "/api/v1/configurationManager"
 # One object per role, so that an update or a delete under test cannot change what another
 # operation uses, in whatever order they run.
 ROLES = ("mutable", "disposable")
+# `promotable` is made the default provider by the operation that sets the default.
+PROVIDER_ROLES = (*ROLES, "promotable")
 AUTH_PROVIDERS = ("azureAd", "microsoft", "google", "sso", "oauth")
 
 # What a `<setting>.saved` value says in the report. The setting itself can be a secret.
@@ -160,15 +162,13 @@ def _saved_fields(
 
 
 @pytest.fixture(scope="module")
-def contract_smtp(request: pytest.FixtureRequest, pipeshub_client: PipeshubClient) -> Iterator[Any]:
-    what = "SMTP configuration"
-    if not _get(pipeshub_client, "/smtpConfig", what):
-        # The API cannot remove a configuration, so the run needs one to put back.
-        # `smtp_configured` writes one from SMTP_HOST and SMTP_PORT, and skips without them.
-        with suppress(pytest.skip.Exception):
-            request.getfixturevalue("smtp_configured")
+def contract_smtp(pipeshub_client: PipeshubClient, smtp_ready: str) -> Iterator[Any]:
+    # The API cannot remove an SMTP configuration, so the run needs one to put back.
+    # `smtp_ready` writes one from the SMTP_* environment if the deployment has none,
+    # and skips without that environment.
+    del smtp_ready
     fields = ("host", "port", "username", "password", "fromEmail")
-    with _saved_fields(pipeshub_client, what, "/smtpConfig", fields) as before:
+    with _saved_fields(pipeshub_client, "SMTP configuration", "/smtpConfig", fields) as before:
         yield before
 
 
@@ -252,16 +252,32 @@ def contract_metrics_collection(pipeshub_client: PipeshubClient) -> Iterator[dic
         }
 
     def write(value: dict[str, Any]) -> None:
-        # The switch last: turning it off posts the metrics to the server URL at once.
+        # Only what changed, and the switch last: a request that turns it off makes the
+        # server post its metrics to the server URL at once, also when it is off already.
+        current: dict[str, Any] = {}
+        with suppress(Exception):
+            current = read()
         for method, path, field in (
             ("PATCH", "/metricsCollection/serverUrl", "serverUrl"),
             ("PATCH", "/metricsCollection/pushInterval", "pushIntervalMs"),
             ("PUT", "/metricsCollection/toggle", "enableMetricCollection"),
         ):
-            _restore(pipeshub_client, method, path, f"{what} ({field})", {field: value[field]})
+            if current.get(field) != value[field]:
+                _restore(pipeshub_client, method, path, f"{what} ({field})", {field: value[field]})
 
     with _saved(what, read, write) as before:
         yield before
+
+
+@pytest.fixture(scope="module")
+def contract_metrics_enabled(contract_metrics_collection: dict[str, Any]) -> str:
+    if not contract_metrics_collection["enableMetricCollection"]:
+        pytest.skip(
+            "Metrics collection is off on this deployment. Each request that turns it off, "
+            "also the one that puts the switch back, makes the server send its metrics to "
+            "the collector."
+        )
+    return "on"
 
 
 @pytest.fixture(scope="module")
@@ -317,7 +333,7 @@ def contract_web_search_providers(
     path = f"{_BASE}/web-search/providers"
     created: dict[str, str] = {}
     try:
-        for role in ROLES:
+        for role in PROVIDER_ROLES:
             # DuckDuckGo needs no API key. The API searches with it once before it stores it.
             resp = pipeshub_client.request(
                 "POST", path, json={"provider": "duckduckgo", "configuration": {}}
@@ -384,38 +400,42 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
     _saved_source(
         "contract_smtp",
         "smtp.saved",
-        f"The SMTP configuration, {_PUT_BACK}; if the deployment has none, the existing fixture "
-        "`smtp_configured` first writes one from SMTP_HOST and SMTP_PORT, and without those "
-        "this fixture fails, because the API cannot remove a configuration.",
+        f"The SMTP configuration, {_PUT_BACK}; if the deployment has none, the shared fixture "
+        "`smtp_ready` first writes the one of the SMTP_* environment, which the API cannot "
+        "remove again, and without that environment (or with HIDE_SECRET_CONFIG, which masks "
+        "the configuration) the operation is skipped.",
     ),
     ValueSource(
         "contract_auth_configs",
         tuple(f"authConfig.{provider}.saved" for provider in AUTH_PROVIDERS),
         lambda before: tuple(_state(before[provider]) for provider in AUTH_PROVIDERS),
         "The configuration of each sign-in provider (Azure AD, Microsoft, Google, SAML SSO, "
-        f"OAuth), {_PUT_BACK}; a provider that had none keeps a placeholder "
-        f"(`{_PLACEHOLDER}`, JIT off), because the API cannot remove one.",
+        f"OAuth), {_PUT_BACK}; a provider that had none keeps a placeholder configuration "
+        f"(`{_PLACEHOLDER}`, JIT off) after the run, because the API cannot remove one.",
     ),
     _saved_source(
         "contract_frontend_public_url",
         "frontendPublicUrl.saved",
-        f"The public URL of the frontend, {_PUT_BACK}; it creates nothing.",
+        f"The public URL of the frontend, {_PUT_BACK}; it creates nothing, and the operation "
+        "is skipped on a deployment that has none, because the API cannot remove it.",
     ),
     _saved_source(
         "contract_connector_public_url",
         "connectorPublicUrl.saved",
-        f"The public URL of the connector service, {_PUT_BACK}; if it had none it keeps "
-        f"`{_PLACEHOLDER_URL}`, because the API cannot remove it.",
+        f"The public URL of the connector service, {_PUT_BACK}; a deployment that had none "
+        f"keeps `{_PLACEHOLDER_URL}` after the run, because the API cannot remove it.",
     ),
     _saved_source(
         "contract_platform_settings",
         "platformSettings.saved",
-        f"The upload size limit and the feature flags, {_PUT_BACK}; it creates nothing.",
+        f"The upload size limit and the feature flags, {_PUT_BACK}; a deployment that had "
+        "stored none then has its defaults stored as explicit values.",
     ),
     _saved_source(
         "contract_system_prompts",
         "systemPrompts.saved",
-        f"The three custom system prompts, {_PUT_BACK}; it creates nothing.",
+        f"The three custom system prompts, {_PUT_BACK}; a deployment that had stored none "
+        "then has the prompts that it showed before stored as explicit values.",
     ),
     ValueSource(
         "contract_metrics_collection",
@@ -424,25 +444,34 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         "The switch, the push interval and the server URL of the metrics collection, "
         f"{_PUT_BACK}; it creates nothing, and the server URL is the one that valid requests send.",
     ),
+    ValueSource(
+        "contract_metrics_enabled",
+        ("metricsCollection.enabled",),
+        lambda state: (state,),
+        "That metrics collection is on; it creates nothing, and the operation is skipped on a "
+        "deployment that has it off, because each request that turns it off makes the server "
+        "send its metrics to the collector.",
+    ),
     _saved_source(
         "contract_web_search",
         "webSearch.saved",
         "The web search settings (images) and which provider is the default, "
-        f"{_PUT_BACK}; it creates nothing.",
+        f"{_PUT_BACK}; a deployment that had stored none then has the default settings stored.",
     ),
     ValueSource(
         "contract_duckduckgo_agents",
         ("duckduckgo.agentCount",),
         lambda count: (count,),
-        "The number of agents that search with DuckDuckGo; it creates nothing, and it fails "
-        "unless the number is 0, because the API then refuses to delete a stored DuckDuckGo "
-        "provider.",
+        "The number of agents that search with DuckDuckGo, which is 0; it creates nothing, and "
+        "the operations are skipped on a deployment that has such an agent, because the API "
+        "then refuses to delete a stored DuckDuckGo provider.",
     ),
     ValueSource(
         "contract_web_search_providers",
-        tuple(f"webSearchProvider.{role}.key" for role in ROLES),
-        lambda providers: tuple(providers[role] for role in ROLES),
-        "Two stored DuckDuckGo web search providers (no API key): one to update, one to delete.",
+        tuple(f"webSearchProvider.{role}.key" for role in PROVIDER_ROLES),
+        lambda providers: tuple(providers[role] for role in PROVIDER_ROLES),
+        "Three stored DuckDuckGo web search providers (no API key): one to update, one to "
+        "delete, one to make the default.",
     ),
     ValueSource(
         "contract_slack_bots",

@@ -12,8 +12,8 @@ include_path_regex: "^/configurationManager/(?!ai-models|aiModelsConfig)"
 # Value for each path parameter.
 #
 # Roles keep the operations apart, in whatever order they run: `mutable` is
-# updated, `disposable` is deleted by the DELETE operation, and `builtIn` is the
-# web search provider that the API always lists and stores nowhere.
+# updated, `disposable` is deleted by the DELETE operation, and `promotable` is
+# made the default by the operation that sets the default.
 path_parameters:
   operations:
     updateSlackBotConfig:
@@ -25,13 +25,23 @@ path_parameters:
       providerKey: webSearchProvider.mutable.key
     deleteWebSearchProvider:
       providerKey: webSearchProvider.disposable.key
-    # A stored provider is searched with before it becomes the default (a call to the
-    # provider). The built-in one becomes the default with no check.
+    # A stored provider: the API looks it up, runs a search with it and moves the
+    # default flag. The built-in key `duckduckgo` would only clear the flags
+    # (cm_controller.ts, updateDefaultWebSearchProvider); that path is not sent.
     updateDefaultWebSearchProvider:
-      providerKey: webSearchProvider.builtIn.key
+      providerKey: webSearchProvider.promotable.key
 
 # Body fields that get a real value in one operation.
 values_by_operation:
+  # The spec has no `minLength` for `certificate`, and Schemathesis sends "" in
+  # every valid request; the API requires one character (validators.ts,
+  # ssoConfigSchema). The run does not show that gap any more.
+  setSsoAuthConfig:
+    body.certificate: sso.certificate
+  # The same for `clientId` (validators.ts, oauthConfigSchema). The other three
+  # sign-in setters get the example of the spec as `clientId` and need no value.
+  setOAuthConfig:
+    body.clientId: oauth.clientId
   # The server posts its metrics, with the API key of its collector, to this URL.
   # Every valid request therefore sends the URL that the deployment already has.
   # The price: the run does not show a URL that the spec allows (`format: uri`)
@@ -41,7 +51,9 @@ values_by_operation:
 
 # Values that the suite file gives itself.
 constants:
-  webSearchProvider.builtIn.key: duckduckgo
+  # Made-up values. The API stores them and checks nothing.
+  sso.certificate: contract-not-a-certificate
+  oauth.clientId: contract-client-id
 
 # ID fields whose value the client is free to choose. They keep the generated
 # value, and a request with one is judged like any other.
@@ -57,7 +69,9 @@ client_chosen_ids:
 #
 # A `<setting>.saved` key is a fixture that reads a setting of the whole
 # organization before the run and puts it back when the tests of this suite
-# are done.
+# are done. Every setter that is sent has one. That also covers a request with
+# a property the spec does not know: the API drops the property and handles the
+# request like a valid one.
 requires:
   createSMTPConfig:
     - smtp.saved
@@ -79,8 +93,13 @@ requires:
     - platformSettings.saved
   setCustomSystemPrompt:
     - systemPrompts.saved
+  # Every request that turns the switch off makes the server send its metrics to
+  # the collector at once, also when the switch is off already (cm_controller.ts,
+  # toggleMetricsCollection). A deployment that has collection off must not send
+  # any, so there the operation is skipped (`metricsCollection.enabled`).
   toggleMetricsCollection:
     - metricsCollection.saved
+    - metricsCollection.enabled
   setMetricsCollectionRemoteServer:
     - metricsCollection.saved
   # No request can be accepted today (see `no_success_response`). When the spec
