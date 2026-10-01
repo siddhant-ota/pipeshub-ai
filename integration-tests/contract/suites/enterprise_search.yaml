@@ -1,0 +1,98 @@
+# Contract-test suite: enterprise search (conversations, semantic search, agents).
+# Routes: backend/nodejs/apps/src/modules/enterprise_search/routes/es.routes.ts
+
+name: enterprise-search
+
+include_path_regex: "^/(conversations|search|agents)(/|$)"
+
+# Fixture key for each path parameter. `operations` wins over `defaults`;
+# in `defaults` the first matching path prefix wins.
+path_parameters:
+  defaults:
+    - path_prefix: /agents
+      values:
+        agentKey: agent.main.key
+        conversationId: agentConversation.mutable.id
+        messageId: agentConversation.mutable.botMessageId
+    - path_prefix: /conversations
+      values:
+        conversationId: conversation.mutable.id
+        messageId: conversation.mutable.botMessageId
+    - path_prefix: /search
+      values:
+        searchId: search.readonly.id
+
+  operations:
+    getConversationById:
+      conversationId: conversation.readonly.id
+    archiveConversation:
+      conversationId: conversation.archivable.id
+    unarchiveConversation:
+      conversationId: conversation.archivable.id
+    deleteConversationById:
+      conversationId: conversation.disposable.id
+
+    archiveSearch:
+      searchId: search.archivable.id
+    unarchiveSearch:
+      searchId: search.archivable.id
+    deleteSearchById:
+      searchId: search.disposable.id
+
+    updateAgent:
+      agentKey: agent.mutable.key
+    deleteAgent:
+      agentKey: agent.disposable.key
+    getAgentConversationById:
+      conversationId: agentConversation.readonly.id
+    archiveAgentConversation:
+      conversationId: agentConversation.archivable.id
+    unarchiveAgentConversation:
+      conversationId: agentConversation.archivable.id
+    deleteAgentConversationById:
+      conversationId: agentConversation.disposable.id
+
+# Only invalid requests are sent. The backend must reject them before it
+# reaches the LLM, so these runs cost nothing and still check validation.
+negative_only:
+  reason: A valid request calls the LLM.
+  operations:
+    - createConversation
+    - streamChat
+    - addMessage
+    - addMessageStream
+    - regenerateAnswer
+    - createAgentConversation
+    - streamAgentConversation
+    - addAgentConversationMessage
+    - streamAgentConversationMessage
+    - regenerateAgentConversationMessage
+
+# Resources that a successful test case creates. `cleanup` deletes them.
+# `{id}` is the value at `id_pointer` in the response; other `{...}` are fixture keys.
+created_resources:
+  - operation: createAgent
+    id_pointer: /agent/_key
+    delete_path: /agents/{id}
+  - operation: search
+    id_pointer: /searchId
+    delete_path: /search/{id}
+  # Negative-only, but the backend can accept a request that the spec forbids.
+  - operation: createConversation
+    id_pointer: /conversation/_id
+    delete_path: /conversations/{id}
+  - operation: createAgentConversation
+    id_pointer: /conversation/_id
+    delete_path: /agents/{agent.main.key}/conversations/{id}
+
+skip:
+  - operation: deleteSearchHistory
+    reason: Deletes all search history of the user, which removes the search fixtures.
+  - operation: uploadConversationChatAttachments
+    reason: Multipart file upload. Needs a file fixture.
+  - operation: deleteConversationChatAttachment
+    reason: Needs an uploaded attachment fixture.
+  - operation: uploadAgentConversationChatAttachments
+    reason: Multipart file upload. Needs a file fixture.
+  - operation: deleteAgentConversationChatAttachment
+    reason: Needs an uploaded attachment fixture.
