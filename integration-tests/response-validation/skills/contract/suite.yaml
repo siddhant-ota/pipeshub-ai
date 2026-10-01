@@ -1,0 +1,124 @@
+# Contract-test suite: skills (Personal Settings > Skills).
+# Routes: backend/nodejs/apps/src/modules/skills/routes/skills.routes.ts
+# Every handler forwards to the query service: backend/python/app/api/routes/skills.py
+# The keys on the right-hand side (`skill.mutable.name`, ...) are produced
+# by `contract_values` in conftest.py.
+
+name: skills
+
+include_path_regex: "^/skills(/|$)"
+
+# A skill is addressed by its name, and the API shows a user only the skills that
+# this user created (and the built-in ones). The fixtures create one skill per role
+# as the test user, so that no operation touches a skill of anyone else:
+# `readonly` is only read, `mutable` is updated, `patchable` has the marker text in
+# its body, `deprecatable` is deprecated, `enabled` is disabled by the disable
+# operation, `disabled` already is, for the enable operation, `versioned` and
+# `rollbackable` have one archived version, `disposable` is deleted by the DELETE
+# operation, and the three `resource...` skills are for the bundled-resource
+# operations.
+path_parameters:
+  defaults:
+    - path_prefix: /skills
+      values:
+        name: skill.readonly.name
+        version: skill.versioned.version
+        candidateId: skillCandidate.unknownId
+
+  operations:
+    updateSkill:
+      name: skill.mutable.name
+    deleteSkill:
+      name: skill.disposable.name
+    patchSkillBody:
+      name: skill.patchable.name
+    deprecateSkill:
+      name: skill.deprecatable.name
+    disableSkill:
+      name: skill.enabled.name
+    enableSkill:
+      name: skill.disabled.name
+    listSkillVersions:
+      name: skill.versioned.name
+    getSkillVersion:
+      name: skill.versioned.name
+    rollbackSkill:
+      name: skill.rollbackable.name
+    getSkillResource:
+      name: skill.resourceReadable.name
+    writeSkillResource:
+      name: skill.resourceWritable.name
+    removeSkillResource:
+      name: skill.resourceRemovable.name
+
+# No request field of this suite is named like an ID, so the loader asks for none
+# of these. They are here because no valid request can succeed with a generated
+# value. Each comment says which gap in the spec the value hides.
+values_by_operation:
+  # The name is the ID of the new skill, and the client chooses it. `{case}` in the
+  # value gives each request its own name, so every valid request can create a skill.
+  # Hidden: the spec has no pattern and no length for `name`, and Schemathesis sends
+  # "". The API takes lowercase letters, digits and single hyphens, 64 characters at
+  # most (skills/validator.py).
+  createSkill:
+    body.name: skill.created.name
+  # `content` is a whole SKILL.md file, with the name of the skill in it. `name`
+  # renames the imported skill; it gets the name that the file already has. Both
+  # values have `{case}`, and one request gets one number, so they agree.
+  # Hidden: the spec allows any text as `content`, and any text as `name`.
+  finalizeSkillImport:
+    body.content: skill.imported.content
+    body.name: skill.imported.name
+  # Only the content of the file counts: a zip or tar archive with a SKILL.md.
+  previewUploadSkillImport:
+    body.file: skill.archive.path
+  # The API answers 400 unless `old_string` is in the body exactly once. Replacing
+  # the marker with itself keeps it there for the next request.
+  # Hidden: the spec allows an empty `old_string`, which is never there exactly once.
+  patchSkillBody:
+    body.old_string: skill.patchable.marker
+    body.new_string: skill.patchable.marker
+  rollbackSkill:
+    body.version: skill.rollbackable.version
+  # Hidden: the spec has no `minLength` for `path`, and the API wants one character.
+  getSkillResource:
+    query.path: skill.resourceReadable.path
+  removeSkillResource:
+    query.path: skill.resourceRemovable.path
+
+constants:
+  # A candidate ID is a UUID (extractor.py). This one names no candidate.
+  skillCandidate.unknownId: "00000000-0000-4000-8000-000000000000"
+
+no_success_response:
+  - operation: approveSkillCandidate
+    reason: >-
+      No API call creates a candidate. Only the learning loop of an agent run does
+      (PIPESHUB_SKILLS_LEARNING_ENABLED, off by default, and it calls the LLM), so
+      the ID names no candidate and the API answers 404.
+
+negative_only:
+  - reason: A valid request downloads a package from the internet (the npm registry, GitHub, or the URL in the request).
+    operations:
+      - previewNpmSkillImport
+      - previewUrlSkillImport
+
+# The four import routes share one limiter: 10 requests per minute for each user
+# (createSkillsImportRateLimiter). They run one after the other, so at most two of
+# them fall into the same minute; no two neighbours add up to more than 8.
+operation_rate_limits:
+  previewNpmSkillImport: 4/m
+  previewUrlSkillImport: 4/m
+  previewUploadSkillImport: 1/m
+  finalizeSkillImport: 7/m
+
+# The name of a skill is its ID. A skill that a request created without a 2xx answer
+# (finalize writes the resources after the skill) is deleted by the teardown of
+# `contract_new_skill_names` in conftest.py, which finds it by the prefix of its name.
+created_resources:
+  - operation: createSkill
+    id_pointer: /name
+    delete_path: /skills/{id}
+  - operation: finalizeSkillImport
+    id_pointer: /name
+    delete_path: /skills/{id}
