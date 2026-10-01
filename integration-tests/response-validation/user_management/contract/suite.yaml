@@ -1,0 +1,213 @@
+# Contract-test suite: user management (users, user groups, teams, organization).
+# Routes: backend/nodejs/apps/src/modules/user_management/routes/
+#   users.routes.ts, userGroups.routes.ts, teams.routes.ts, org.routes.ts
+# The team operations and GET /users/graph/list forward to the connector service:
+#   backend/python/app/api/routes/entity.py
+# The keys on the right-hand side (`user.mutable.id`, ...) are produced
+# by `contract_values` in conftest.py.
+
+name: user-management
+
+include_path_regex: "^/(users|userGroups|teams|org)(/|$)"
+
+# Roles keep the operations apart, in whatever order they run: `readonly` is
+# only read, `mutable` is updated and `disposable` is deleted by the DELETE
+# operation. `blocked` is a user whose login is blocked, for the unblock
+# operation. Every `{id}` is a user that a fixture created, never the user the
+# tests log in as.
+path_parameters:
+  defaults:
+    - path_prefix: /users
+      values:
+        id: user.readonly.id
+    - path_prefix: /userGroups
+      values:
+        groupId: userGroup.readonly.id
+        userId: user.readonly.id
+    - path_prefix: /teams
+      values:
+        teamId: team.readonly.id
+
+  operations:
+    updateUser:
+      id: user.mutable.id
+    updateEmail:
+      id: user.mutable.id
+    updateFullName:
+      id: user.mutable.id
+    updateFirstName:
+      id: user.mutable.id
+    updateLastName:
+      id: user.mutable.id
+    updateDesignation:
+      id: user.mutable.id
+    deleteUser:
+      id: user.disposable.id
+    unblockUser:
+      id: user.blocked.id
+
+    updateUserGroup:
+      groupId: userGroup.mutable.id
+    deleteUserGroup:
+      groupId: userGroup.disposable.id
+
+    updateTeam:
+      teamId: team.mutable.id
+    deleteTeam:
+      teamId: team.disposable.id
+
+values:
+  query.groupIds: userGroup.readonly.id
+  # Only the creator of a team is accepted, and the fixture teams are created
+  # by the user the tests log in as. It is only read here.
+  query.created_by: user.self.id
+  # A team member must be a user that the graph already has.
+  body.userRoles[*].userId: user.teamMember.id
+  body.addUserRoles[*].userId: user.teamMember.id
+  body.updateUserRoles[*].userId: user.teamMember.id
+  body.removeUserIds[*]: user.teamMember.id
+
+# The user and group IDs in a body are given for each operation, so that no
+# request can name a group or a user that a fixture did not create. The API
+# adds a user to any group it is given, also to `everyone`.
+values_by_operation:
+  createUser:
+    # The email of a user must be new, also among the deleted users, and every
+    # request would otherwise carry the example of the spec. The value is a
+    # different one in each request.
+    body.email: user.new.email
+    # The API refuses to delete an admin, and the cleanup of `created_resources`
+    # is one DELETE. So every user that a test case creates is a member.
+    # Gap: the run does not show that the API accepts `role: admin`.
+    body.role: user.role.member
+  updateUser:
+    # Only the owner of an account may change its email (403 for anyone else).
+    # With the email the user already has, the request is not a change.
+    # Gap: the run shows neither that 403 nor a change of the email.
+    body.email: user.mutable.email
+  updateEmail:
+    # As for updateUser. Gap: only the answer `notNeeded` is checked.
+    body.email: user.mutable.email
+  getUsersByIds:
+    body.userIds[*]: user.readonly.id
+  # The API invites nobody and sends no email when every address belongs to a
+  # user who has logged in. That user is already in the group. The address
+  # also goes into the request with an unknown property, which the API accepts.
+  # Gap: the run does not show an invitation, only the answer for users who
+  # are already active.
+  bulkInviteUsers:
+    body.emails[*]: user.readonly.email
+    body.groupIds[*]: userGroup.readonly.id
+  # A CSV file with one address that the API finds invalid: it invites nobody.
+  # Gap: the run does not show an invitation.
+  bulkInviteUsersFromFile:
+    body.file: invite.path
+  addUsersToGroup:
+    body.userIds[*]: user.member.id
+    body.groupIds[*]: userGroup.joinable.id
+  removeUsersFromGroup:
+    body.userIds[*]: user.member.id
+    body.groupIds[*]: userGroup.leavable.id
+  # A group name must be new among the groups of the organization. The value
+  # is a different one in each request.
+  createUserGroup:
+    body.name: userGroup.new.name
+  updateUserGroup:
+    body.name: userGroup.renamed.name
+  # The file of a multipart body: the value is the path of a real image. The
+  # generated file is empty and has no type, and the API rejects it.
+  uploadUserDisplayPicture:
+    body.file: image.path
+  uploadOrganizationLogo:
+    body.file: image.path
+  # A valid request writes back what the organization already has. An empty
+  # value is not written at all (org.controller.ts). The fixture behind the
+  # keys puts the profile back at the end. Gap: the run does not show a
+  # change of the names or of the contact email.
+  updateOrganization:
+    body.registeredName: org.current.registeredName
+    body.shortName: org.current.shortName
+    body.contactEmail: org.current.contactEmail
+
+constants:
+  user.role.member: member
+
+client_chosen_ids:
+  - field: body.address._id
+    reason: The API drops it. The validation of updateUser removes every key of `address` that it does not list.
+  - field: body.permanentAddress._id
+    reason: The API drops it. The validation of updateOrganization removes every key of `permanentAddress` that it does not list.
+
+ids_without_fixture:
+  - field: body.groupIds
+    reason: >-
+      Only bulkInviteUsersFromFile has it, as a JSON-encoded text in the
+      multipart body. The API uses the groups only for the users that it
+      invites, and the file of the suite makes it invite nobody.
+
+# Only invalid requests are sent. The API rejects them before it does anything.
+# The success response of these operations is not checked.
+negative_only:
+  - reason: A valid request sends an invitation email to the user.
+    operations:
+      - resendUserInvite
+  - reason: >-
+      No valid request can succeed. The API creates an organization only on a
+      deployment that has none, and answers 400 on every other. The tests
+      cannot log in to a deployment that has no organization.
+    operations:
+      - createOrganization
+
+# All invalid requests are sent. Of the valid ones, only the example of the spec.
+examples_only:
+  - reason: >-
+      A user can be unblocked once. A second valid request finds the user not
+      blocked and gets 400, which says nothing about the spec. The spec has one
+      example, so the run sends one valid request.
+    operations:
+      - unblockUser
+
+# Values that an operation needs and that go into no request.
+requires:
+  # These act on the user the tests log in as, and on the organization. The
+  # fixture behind each key makes sure there is something to read and to
+  # remove, and puts back what was there before.
+  getUserDisplayPicture:
+    - user.self.displayPicture
+  uploadUserDisplayPicture:
+    - user.self.displayPicture
+  removeUserDisplayPicture:
+    - user.self.displayPicture
+  getOrganizationLogo:
+    - org.logo
+  uploadOrganizationLogo:
+    - org.logo
+  deleteOrganizationLogo:
+    - org.logo
+  updateOnboardingStatus:
+    - org.onboardingStatus
+  # Without SMTP the API answers 404 before it looks at the request.
+  bulkInviteUsers:
+    - smtp.configured
+  bulkInviteUsersFromFile:
+    - smtp.configured
+
+# Resources that a successful test case creates; the test deletes them at the end.
+# `{id}` is the value at `id_pointer` in the response.
+created_resources:
+  - operation: createUser
+    id_pointer: /_id
+    delete_path: /users/{id}
+  - operation: createUserGroup
+    id_pointer: /_id
+    delete_path: /userGroups/{id}
+  - operation: createTeam
+    id_pointer: /data/id
+    delete_path: /teams/{id}
+
+skip:
+  - operation: deleteOrganization
+    reason: >-
+      Deletes the organization of the deployment, and the API cannot bring it
+      back. Every later request of every suite would fail. The operation has
+      no parameters, so every request to it is accepted.
