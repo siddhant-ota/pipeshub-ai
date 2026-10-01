@@ -33,7 +33,10 @@ from helper.contract.suite import Suite
 from helper.contract.values import ContractValues
 
 INTEGRATION_TESTS_DIR = Path(__file__).resolve().parents[2]
-REPORTS_DIR = INTEGRATION_TESTS_DIR / "reports" / "contract"
+# Where runs are written. CONTRACT_REPORTS_DIR moves it, for example to a CI artifact folder.
+REPORTS_DIR = Path(
+    os.getenv("CONTRACT_REPORTS_DIR") or INTEGRATION_TESTS_DIR / "reports" / "contract"
+)
 
 # 0: every check passed. 1: some failed. Anything else: Schemathesis could not run.
 _COMPLETED_EXIT_CODES = (0, 1)

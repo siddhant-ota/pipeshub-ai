@@ -15,7 +15,7 @@ from helper.contract.config import (
     STATE_SKIPPED,
     STATE_VALUE_MISSING,
 )
-from helper.contract.report import render_report
+from helper.contract.report import render_report, summary_lines
 from helper.contract.results import (
     NEGATIVE_REJECTION,
     POSITIVE_ACCEPTANCE,
@@ -337,6 +337,19 @@ def test_report_states_the_contract_and_the_coverage(tmp_path: Path) -> None:
     assert "| `DELETE /things/{thingId}` | deleteThing | Skipped | Destructive. |" in report
     assert "- **new** — query.limit: Value greater than maximum" in report
     assert "Example: `GET /things?limit=101`" in report
+
+
+def test_an_operation_with_differences_can_also_have_a_coverage_gap(tmp_path: Path) -> None:
+    """A negative-only operation that differs is still not fully checked."""
+    run = operation_run("listThings", "GET", "/things", state=STATE_NEGATIVE_ONLY, reason="Calls the LLM.")
+    result = _collect(tmp_path, [LIMIT_ABOVE_MAXIMUM], run=run)
+
+    assert result.verdict == VERDICT_MISMATCH
+    assert summary_lines([result]) == [
+        "Contract: DIFFERS — 1 new difference(s), 0 known, 0 stale in the baseline.",
+        "Coverage: INCOMPLETE — 1 of 1 operations have a coverage gap.",
+        "  Differs: GET /things — Invalid requests only; the success response is not checked. Calls the LLM.",
+    ]
 
 
 def test_report_of_a_clean_run(tmp_path: Path) -> None:

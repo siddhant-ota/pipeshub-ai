@@ -36,8 +36,6 @@ _VERDICT_TEXT = {
     VERDICT_MATCH: ("Matches", "The spec and the API agree, and a success response was checked"),
 }
 _VERDICT_ORDER = tuple(_VERDICT_TEXT)
-# Verdicts that leave part of the operation's contract unchecked.
-_GAP_VERDICTS = (VERDICT_NOT_RUN, VERDICT_UNVERIFIED, VERDICT_PARTIAL, VERDICT_SKIPPED)
 _STATE_TEXT = {STATE_FULL: "full", STATE_NEGATIVE_ONLY: "invalid requests only"}
 _MESSAGE_LINES = 12
 _EXAMPLE_CHARS = 300
@@ -63,6 +61,12 @@ def _statuses(result: OperationResult) -> str:
     return ", ".join(f"{status}×{count}" for status, count in sorted(result.statuses.items()))
 
 
+def _bold_label(sentence: str) -> str:
+    """`Contract: DIFFERS — ...` -> `**Contract: DIFFERS** — ...`."""
+    label, separator, rest = sentence.partition(" — ")
+    return f"**{label}**{separator}{rest}"
+
+
 def _finding_lines(finding: Finding) -> list[str]:
     marker = "known" if finding.known else "new"
     example = finding.example_request.replace("`", "'")
@@ -78,19 +82,42 @@ def _finding_lines(finding: Finding) -> list[str]:
     return lines
 
 
-def render_report(results: list[OperationResult], meta: dict[str, Any]) -> str:
-    results = [result for result in results if result.verdict != VERDICT_DESELECTED]
-    verdicts = Counter(result.verdict for result in results)
+def _headline(results: list[OperationResult]) -> tuple[str, str]:
+    """The two sentences that say how the run went: the contract, and how much of it was checked."""
     new = sum(len(result.new_findings) for result in results)
     known = sum(len(result.known_findings) for result in results)
     stale = sum(len(result.stale) for result in results)
-    gaps = [result for result in results if result.verdict in _GAP_VERDICTS]
+    gaps = sum(bool(result.gap) for result in results)
+    contract = "DIFFERS" if new or stale else "MATCHES (with known differences)" if known else "MATCHES"
+    coverage = "INCOMPLETE" if gaps else "COMPLETE"
+    return (
+        f"Contract: {contract} — {new} new difference(s), {known} known, {stale} stale in the baseline.",
+        f"Coverage: {coverage} — {gaps} of {len(results)} operations have a coverage gap.",
+    )
+
+
+def summary_lines(results: list[OperationResult]) -> list[str]:
+    """A short text summary of a run, with one line for each coverage gap."""
+    results = [result for result in results if result.verdict != VERDICT_DESELECTED]
+    gaps = [result for result in results if result.gap]
+    return [
+        *_headline(results),
+        *(
+            f"  {_VERDICT_TEXT[result.verdict][0]}: {result.run.label} — {result.gap}"
+            for result in sorted(gaps, key=lambda r: (_VERDICT_ORDER.index(r.verdict), r.run.path))
+        ),
+    ]
+
+
+def render_report(results: list[OperationResult], meta: dict[str, Any]) -> str:
+    results = [result for result in results if result.verdict != VERDICT_DESELECTED]
+    verdicts = Counter(result.verdict for result in results)
+    gaps = [result for result in results if result.gap]
+    contract, coverage = _headline(results)
     server_errors = [
         result for result in results if any(status.startswith("5") for status in result.statuses)
     ]
 
-    contract = "DIFFERS" if new or stale else "MATCHES (with known differences)" if known else "MATCHES"
-    coverage = "INCOMPLETE" if gaps else "COMPLETE"
     lines = [
         f"# API contract report: {meta['suite']}",
         "",
@@ -99,9 +126,9 @@ def render_report(results: list[OperationResult], meta: dict[str, Any]) -> str:
         f"- Spec commit: `{meta['spec_commit']}`",
         f"- Test cases sent: {sum(result.cases for result in results)}",
         "",
-        f"**Contract: {contract}** — {new} new difference(s), {known} known, {stale} stale in the baseline.",
+        _bold_label(contract),
         "",
-        f"**Coverage: {coverage}** — {len(gaps)} of {len(results)} operations have a coverage gap.",
+        _bold_label(coverage),
         "",
         "The API is the reference: a difference means the spec does not describe what the API does.",
         "",
