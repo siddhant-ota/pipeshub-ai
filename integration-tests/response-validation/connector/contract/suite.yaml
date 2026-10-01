@@ -1,0 +1,206 @@
+# Contract-test suite: connector instances and their registry, configuration,
+# filters and sign-in; crawl schedules; OAuth configurations of connector types.
+# Routes: backend/nodejs/apps/src/modules/tokens_manager/routes/connectors.routes.ts
+# (/api/v1/connectors), tokens_manager/routes/oauth.routes.ts (/api/v1/oauth) and
+# crawling_manager/routes/cm_routes.ts (/api/v1/crawlingManager). The connector and
+# OAuth handlers forward to the Python connector service:
+# backend/python/app/connectors/api/router.py.
+# The keys on the right-hand side (`connector.mutable.id`, ...) are produced
+# by `contract_values` in conftest.py.
+
+name: connectors
+
+include_path_regex: "^/(connectors|crawlingManager|oauth)(/|$)"
+
+# Value for each path parameter. `operations` wins over `defaults`; in
+# `defaults` the first matching path prefix wins.
+#
+# Roles keep the operations apart, in whatever order they run: `readonly` is
+# only read, `mutable` is updated, `disposable` is deleted by the DELETE
+# operation. `idle` is never enabled; it takes the invalid requests of the
+# operations that start a sync. The other roles name the state an operation
+# needs: a connector of a type with a sign-in (`oauth`, `apiToken`), one that a
+# session of the test user created (`sessionOwned`), one whose source answers
+# (`dynamicFilter`), and one per state of a crawl schedule.
+path_parameters:
+  defaults:
+    - path_prefix: /connectors
+      values:
+        connectorId: connector.readonly.id
+        connectorType: connector.type
+        recordId: knowledgeBase.recordId
+        filterKey: connector.dynamicFilter.key
+    - path_prefix: /crawlingManager
+      values:
+        # A schedule is found by the type of its connector instance, so this
+        # must be the type of the fixture connectors (crawling_service.ts).
+        connector: connector.type
+        connectorId: crawlConnector.scheduled.id
+    - path_prefix: /oauth
+      values:
+        connectorType: oauthConfig.connectorType
+        configId: oauthConfig.readonly.id
+
+  operations:
+    deleteConnectorInstance:
+      connectorId: connector.disposable.id
+    updateConnectorName:
+      connectorId: connector.mutable.id
+    updateConnectorConfig:
+      connectorId: connector.mutable.id
+    updateConnectorAuthConfig:
+      connectorId: connector.mutable.id
+    updateConnectorFiltersSyncConfig:
+      connectorId: connector.mutable.id
+    toggleConnector:
+      connectorId: connector.idle.id
+    resyncConnector:
+      connectorId: connector.idle.id
+    # A knowledge base is a connector instance too, and it is the only one that
+    # is enabled without a sync. This one holds no record: a reindex of it
+    # publishes its event and finds nothing to index.
+    reindexConnector:
+      connectorId: knowledgeBase.empty.id
+    getOAuthAuthorizationUrl:
+      connectorId: connector.oauth.id
+    getConnectorFilters:
+      connectorId: connector.apiToken.id
+    saveConnectorFilters:
+      connectorId: connector.sessionOwned.id
+    getFilterFieldOptions:
+      connectorId: connector.dynamicFilter.id
+
+    scheduleCrawlingJob:
+      connectorId: crawlConnector.schedulable.id
+    removeCrawlingJob:
+      connectorId: crawlConnector.removable.id
+    pauseCrawlingJob:
+      connectorId: crawlConnector.pausable.id
+    resumeCrawlingJob:
+      connectorId: crawlConnector.paused.id
+
+    updateOAuthConfig:
+      configId: oauthConfig.mutable.id
+    deleteOAuthConfig:
+      configId: oauthConfig.disposable.id
+
+# Query and body fields that get a real value wherever a request has them.
+# Loading the suite fails unless every field that holds an ID is in `values`,
+# `client_chosen_ids` or `ids_without_fixture`. A field applies to each
+# operation that has it.
+values:
+  query.nodeId: knowledgeBase.readonly.id
+  # Not IDs, but no valid create can succeed without them.
+  #
+  # A type of the registry: a made-up one is "not found" (create) or matches
+  # no instance (list). What the value hides: the spec allows any text as
+  # `connectorType`, and the API answers 404 for a type that the registry does
+  # not have (the spec documents 400 for it).
+  body.connectorType: connector.type
+  query.connectorType: connector.type
+  # The API refuses a connector name or an OAuth configuration name that is in
+  # use, and Schemathesis repeats its values. Every request gets a name of its
+  # own (`{case}` in the value). What the value hides: the valid names at the
+  # limits of the spec (1 and 100 characters) are not sent. The invalid ones
+  # still are.
+  body.instanceName: testCase.uniqueName
+  body.oauthInstanceName: testCase.uniqueName
+
+# Values that the suite file gives itself.
+constants:
+  # The connector type that needs no credential: an instance is created and
+  # configured without a call to the website it names.
+  connector.type: Web
+  # A connector type with an OAuth sign-in, for the OAuth configurations and for
+  # the two connectors that need a sign-in method.
+  oauthConfig.connectorType: Slack
+  # The filter of the MinIO connector whose options come from the source.
+  connector.dynamicFilter.key: buckets
+
+# ID fields whose value the client is free to choose. They keep the generated
+# value, and a request with one is judged like any other.
+client_chosen_ids:
+  - field: body.deviceId
+    reason: The desktop app chooses its device ID; it names no stored resource.
+  - field: body.config.clientId
+    reason: The client ID of an OAuth application at the third party; the API stores it as given.
+  - field: body.config.tenantId
+    reason: The tenant ID at the third party; the API stores it as given.
+  - field: body.oauthConfigId
+    reason: The gateway does not forward this field to the connector service (createConnectorInstance in connector.controllers.ts), so its value has no effect.
+  - field: body.config.auth.oauthConfigId
+    reason: The test cases create Web connectors, which have no sign-in; the connector service stores the field for them without a lookup.
+  - field: body.auth.oauthConfigId
+    reason: The mutable fixture is a Web connector, which has no sign-in; the connector service stores the field for it without a lookup.
+  - field: query.identifiers[*]
+    reason: Any string is a valid identifier. One that matches no record is answered with 200 and comes back in `not_found_identifiers`.
+
+# ID fields that must name something that exists, and for which no fixture
+# gives a value. They keep the generated value, so a valid request with one
+# names nothing real. If the API rejects it, that is not counted as a
+# difference; the report says how many such requests there were.
+ids_without_fixture:
+  - field: query.state
+    reason: Issued by GET /connectors/{connectorId}/oauth/authorize for one sign-in at the third party. A request with a real state and a made-up code would send that code to the third party.
+
+# Only invalid requests are sent. The gateway rejects them in its validator
+# (connectors.routes.ts) before the connector service is called. The idle
+# connector is a second safeguard: its website does not exist, so it cannot be
+# enabled, and a sync or a resync of a connector that is not enabled is refused.
+# The success response of these operations is not checked.
+negative_only:
+  - reason: A valid request starts a sync of the connector (it reads its source, and the records are indexed with the embedding model and the LLM). The connector is locked while the sync runs, so the answers to the requests after the first would depend on timing.
+    operations:
+      - toggleConnector
+      - resyncConnector
+
+# Operations that are sent, and for which no request can get a 2xx or a 3xx.
+no_success_response:
+  - operation: handleOAuthCallback
+    reason: The gateway wants a login for this route (connectors.routes.ts) and the spec says it needs none (`security` is empty), so the requests carry no token and every one is answered 401. With a login the gateway would answer 200 with `redirectUrl`, which is not the documented 302 either.
+  - operation: getTokenFromCode
+    reason: A success needs the authorization code that Google issues for one consent; nothing can generate it.
+  - operation: updateOAuthConfig
+    reason: The gateway answers 400 unless the body has `baseUrl` (updateOAuthConfig in oauth.controllers.ts). The spec has no such field, and a value of the suite can only replace a field that the spec has, so no request can have it.
+
+# Resources that a successful test case creates; the test deletes them at the end.
+# `{id}` is the value at `id_pointer` in the response; other `{...}` are value keys.
+created_resources:
+  - operation: createConnectorInstance
+    id_pointer: /connector/connectorId
+    delete_path: /connectors/{id}
+  - operation: createOAuthConfig
+    id_pointer: /oauthConfig/_id
+    delete_path: /oauth/{oauthConfig.connectorType}/{id}
+
+# Value keys an operation needs that go into no request.
+requires:
+  # A create that the API answers with 500 can leave its connector behind, and
+  # that response has no ID for `created_resources`. The fixture behind this key
+  # deletes those connectors after the run.
+  createConnectorInstance:
+    - webConnector.existing.count
+  # The route has no validator: it sends the code of every request, valid or
+  # not, to Google with the Google Workspace OAuth client of the organization.
+  # Without such a client it answers 404 before that. The fixture behind this
+  # key is skipped when the organization has one, so the operation is sent only
+  # where it calls nobody.
+  getTokenFromCode:
+    - googleWorkspace.oauthClient
+  # See `last`. The first key is from a fixture that is skipped when the
+  # organization has crawl schedules that the suite did not make. The second is
+  # the connector whose schedule is still there for this operation to remove.
+  removeAllCrawlingJob:
+    - crawlSchedule.ofOthers.count
+    - crawlConnector.removedWithAll.id
+
+# Sent after all other operations of the suite, in a second pass.
+#
+# removeAllCrawlingJob removes every crawl schedule of the organization, also
+# the paused ones. In the order of the spec it comes before pause and resume and
+# would take their fixture schedules away. Nothing puts the schedule of a real
+# connector back (the list of schedules has at most 10 per connector type and
+# not every option), so the operation is sent only where the schedules of the
+# suite are the only ones: see `requires`.
+last:
+  - removeAllCrawlingJob
