@@ -22,14 +22,15 @@ pytestmark = pytest.mark.unit
         ("body.filters.kb[*]", ("body", ("filters", "kb", "*"))),
         ("body.models[*].modelKey", ("body", ("models", "*", "modelKey"))),
         ("body.matrix[*][*]", ("body", ("matrix", "*", "*"))),
+        ("path.thingId", ("path", ("thingId",))),
     ],
 )
 def test_parse_field(name: str, expected: tuple) -> None:
     assert parse_field(name) == expected
 
 
-@pytest.mark.parametrize("name", ["path.id", "body", "query."])
-def test_parse_field_rejects_what_is_not_a_body_or_query_field(name: str) -> None:
+@pytest.mark.parametrize("name", ["header.id", "body", "query."])
+def test_parse_field_rejects_what_is_not_a_request_field(name: str) -> None:
     with pytest.raises(ValueError, match="starts with"):
         parse_field(name)
 
@@ -84,6 +85,7 @@ def test_substitute_a_query_parameter() -> None:
 
 KB = Substitution.for_field("body.filters.kb[*]", "KB")
 PROJECT = Substitution.for_field("query.projectId", "P")
+THING = Substitution.for_field("path.thingId", "T")
 
 
 @pytest.mark.parametrize(
@@ -118,6 +120,9 @@ PROJECT = Substitution.for_field("query.projectId", "P")
         (PROJECT, Mutation("query", "projectId", ""), True),
         (PROJECT, Mutation("query", "limit", ""), False),
         (PROJECT, Mutation("body", "application/json", "/type"), False),
+        (THING, Mutation("path", "thingId", ""), True),
+        (THING, Mutation("path", "kind", ""), False),
+        (THING, Mutation("query", "thingId", ""), False),
     ],
 )
 def test_the_field_under_test_keeps_its_invalid_value(

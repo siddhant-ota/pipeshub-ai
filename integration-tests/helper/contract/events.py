@@ -56,6 +56,15 @@ class Case:
         """The request body as JSON, or None if it is empty or not JSON."""
         return _json(self.request_base64)
 
+    def request_data(self) -> Any:
+        """The request body by field: JSON, or a URL-encoded form as a flat object."""
+        data = self.request_json()
+        text = self.request_body
+        # A multipart body starts with its boundary; its fields are not read.
+        if data is not None or not text or text.startswith("--"):
+            return data
+        return {name: values[0] for name, values in parse_qs(text, keep_blank_values=True).items()}
+
     @property
     def query(self) -> dict[str, list[str]]:
         return parse_qs(urlsplit(self.target).query, keep_blank_values=True)

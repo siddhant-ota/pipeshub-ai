@@ -9,6 +9,7 @@ the terminal summary and the cleanup.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -39,6 +40,7 @@ import pytest
 import tomli_w
 
 import helper.contract.config as contract_config
+from helper.contract.pytest_support import terminal_summary
 from helper.contract.stub_server import stub_server
 
 HERE = Path(__file__).parent
@@ -49,6 +51,10 @@ contract_config.BASE_CONFIG_PATH = HERE / "schemathesis.base.toml"
 contract_config.BASE_CONFIG_PATH.write_bytes(tomli_w.dumps(base).encode())
 
 DELETED = HERE / "deleted.txt"
+
+
+def pytest_terminal_summary(terminalreporter):
+    terminal_summary(terminalreporter)
 
 
 class Response:
@@ -119,10 +125,16 @@ class Projects:
         return Response(200, {})
 
 
+def deleted_by_path(method, path):
+    with DELETED.open("a") as log:
+        log.write(f"{method} {path}\\n")
+    return Response(200, {})
+
+
 @pytest.fixture(scope="session")
 def pipeshub_client():
     with stub_server() as url:
-        yield SimpleNamespace(base_url=url, request=lambda method, path: Response(200, {}))
+        yield SimpleNamespace(base_url=url, request=deleted_by_path)
 
 
 @pytest.fixture(scope="session")
@@ -241,18 +253,25 @@ def test_each_operation_gets_the_outcome_of_its_verdict(project: Path) -> None:
     assert "Traceback" not in output
 
     # The terminal summary names the gap that the suite declares.
-    assert "API contract: enterprise search" in output
+    assert "API contract: enterprise-search" in output
     assert "Contract: DIFFERS — " in output
     assert f"Skipped: {SKIPPED} — Deletes all search history" in output
 
     # Only the selected operations were sent, with the values from the fixtures.
     manifest = (project / "reports/enterprise-search/run/manifest.json").read_text(encoding="utf-8")
     assert manifest.count('"state": "full"') == 2
-    config = (project / "reports/enterprise-search/run/schemathesis.toml").read_text(
-        encoding="utf-8"
+    values = json.loads(
+        (project / "reports/enterprise-search/run/substitutions.json").read_text(encoding="utf-8")
     )
-    assert '"path.searchId" = "search-readonly"' in config
-    assert '"path.conversationId" = "conversation-2"' in config, "the archivable conversation"
+    assert values[DIFFERS] == {"path.searchId": "search-readonly"}
+    assert values[MATCHES] == {"path.conversationId": "conversation-2"}, "the archivable one"
+
+    # The report says which fixtures gave the values, and which of them are new.
+    report = (project / "reports/enterprise-search/run/report.md").read_text(encoding="utf-8")
+    assert "## Fixtures" in report
+    assert "| `contract_searches` | added |" in report
+    assert "`search.readonly.id` = `search-readonly`" in report
+    assert "| `session_kb` | existing |" in report
 
     # The fixtures are deleted at the end: four conversations and four agent conversations by
     # role, and the two that are linked to a project. A search is unarchived first, because

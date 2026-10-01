@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from helper.contract.spec import Operation, operation_definition, resolve
+from helper.contract.spec import Operation, operation_definition, operation_parameters, resolve
 
 ARRAY_ITEM = "[*]"
 # One element of an array, in a path that is split into segments.
@@ -29,7 +29,12 @@ _NOT_AN_ID_FORMAT = frozenset({"date-time", "date", "email", "uri", "binary"})
 _COMBINATORS = ("allOf", "anyOf", "oneOf")
 # Deeper than any request body in the spec. A schema that goes past it is reported, not cut off.
 _MAX_DEPTH = 16
-_JSON = "application/json"
+# Bodies that Schemathesis builds from named fields, so a field of one can get a value.
+_STRUCTURED_BODIES = (
+    "application/json",
+    "application/x-www-form-urlencoded",
+    "multipart/form-data",
+)
 _REF = "$ref"
 
 
@@ -125,10 +130,19 @@ def _walk(
         yield RequestField(path, _holds_an_id(name, schema))
 
 
+def enumerated_path_parameters(spec: dict[str, Any], operation: Operation) -> frozenset[str]:
+    """Path parameters whose values the spec lists. Schemathesis sends every one of them."""
+    return frozenset(
+        parameter["name"]
+        for parameter in operation_parameters(spec, operation)
+        if parameter.get("in") == "path"
+        and resolve(spec, parameter.get("schema") or {}).get("enum") is not None
+    )
+
+
 def request_fields(spec: dict[str, Any], operation: Operation) -> list[RequestField]:
-    """Every leaf field in the query parameters and the JSON body of `operation`."""
+    """Every leaf field in the query parameters and the JSON or form body of `operation`."""
     definition = operation_definition(spec, operation)
-    path_item = spec["paths"][operation.path]
     found: dict[str, RequestField] = {}
 
     def _add(fields: Iterator[RequestField]) -> None:
@@ -137,15 +151,15 @@ def request_fields(spec: dict[str, Any], operation: Operation) -> list[RequestFi
             known = found.get(field.name)
             found[field.name] = field if known is None or field.is_id else known
 
-    for parameter in [*(path_item.get("parameters") or []), *(definition.get("parameters") or [])]:
-        parameter = resolve(spec, parameter)
+    for parameter in operation_parameters(spec, operation):
         if parameter.get("in") != "query":
             continue
         schema = _inherit_description(parameter, parameter.get("schema") or {})
         _add(_walk(spec, schema, f"query.{parameter['name']}", parameter["name"], frozenset()))
 
     body = resolve(spec, definition.get("requestBody") or {})
-    json_body = (body.get("content") or {}).get(_JSON) or {}
-    _add(_walk(spec, json_body.get("schema"), "body", "", frozenset()))
+    for media_type in _STRUCTURED_BODIES:
+        content = (body.get("content") or {}).get(media_type) or {}
+        _add(_walk(spec, content.get("schema"), "body", "", frozenset()))
 
     return sorted(found.values(), key=lambda field: field.name)

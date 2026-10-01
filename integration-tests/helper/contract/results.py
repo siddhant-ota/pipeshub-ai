@@ -55,6 +55,7 @@ _UNEXPECTED_PROPERTIES = "object_unexpected_properties"
 _OPEN_LOCATIONS = frozenset({"query", "header", "cookie"})
 # What a request that fails validation is answered with.
 _VALIDATION_STATUSES = ("400", "422")
+_RATE_LIMITED = 429
 
 _SCHEMA_TITLE = re.compile(r"^Schema(?: at (?P<path>\S+?))?:$")
 _SCHEMA_KEYWORD = re.compile(r'^\s*"(?P<keyword>[^"]+)":\s*(?P<value>.*?),?\s*$')
@@ -117,8 +118,10 @@ class OperationResult:
     findings: dict[FindingKey, Finding] = field(default_factory=dict)
     # Baseline entries for this operation that the run did not reproduce.
     stale: list[FindingKey] = field(default_factory=list)
-    # Requests without a response, and scenarios Schemathesis could not finish.
+    # Requests without a response or turned away by a rate limit, and scenarios
+    # Schemathesis could not finish.
     unfinished: int = 0
+    rate_limited: int = 0
     # Failed checks that say nothing about the spec; see `_is_spec_statement`.
     ignored: int = 0
     # Rejected valid requests that named something that does not exist; see `_names_nothing_real`.
@@ -198,6 +201,12 @@ class OperationResult:
             return self.run.reason
         if not self.cases:
             return "Schemathesis sent no test case for this operation."
+        if self.rate_limited:
+            return (
+                f"{self.rate_limited} request(s) were turned away by a rate limit (HTTP 429) and "
+                "so were not checked. Set a lower `rate_limit`, or one under "
+                "`operation_rate_limits`, in the suite file."
+            )
         if self.unfinished:
             return (
                 f"{self.unfinished} request(s) or scenario(s) did not complete (no response, "
@@ -315,7 +324,7 @@ def _names_nothing_real(case: Case, fixtureless_fields: tuple[str, ...]) -> bool
         if probe.location == QUERY:
             if probe.path[0] in case.query:
                 return True
-        elif substitute(case.request_json(), probe)[1]:
+        elif substitute(case.request_data(), probe)[1]:
             return True
     return False
 
@@ -336,6 +345,12 @@ def _record(result: OperationResult, case: Case, baseline: set[FindingKey]) -> N
         result.statuses["no response"] += 1
         return
     result.statuses[str(case.status)] += 1
+    if case.status == _RATE_LIMITED:
+        # The limiter answered, not the operation, so the request says nothing about the spec.
+        # Schemathesis takes a 429 as "accepted" and as "rejected" alike.
+        result.rate_limited += 1
+        result.unfinished += 1
+        return
     for check in case.checks:
         if check.passed:
             continue

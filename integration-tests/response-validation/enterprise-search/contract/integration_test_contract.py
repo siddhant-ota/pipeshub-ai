@@ -20,32 +20,15 @@ from pathlib import Path
 import pytest
 
 from helper.contract.outcome import assert_spec_matches_api
+from helper.contract.pytest_support import CONTRACT_MARKS, operation_params
 from helper.contract.runner import ContractRun
-from helper.contract.suite import PROFILE_SKIP, load_suite
+from helper.contract.suite import load_suite
 
 SUITE = load_suite(Path(__file__).with_name("suite.yaml"))
 
-pytestmark = [
-    pytest.mark.contract,
-    # The run is one session fixture; under xdist every test must be on the worker that has it.
-    pytest.mark.xdist_group("contract-enterprise-search"),
-]
+pytestmark = CONTRACT_MARKS
 
 
-def _operations() -> list[pytest.ParameterSet]:
-    return [
-        pytest.param(
-            planned.operation.operation_id,
-            id=planned.operation.label,
-            # Skipped here, at collection, so that a skipped operation never starts the run.
-            marks=pytest.mark.skip(reason=planned.reason)
-            if planned.profile == PROFILE_SKIP
-            else (),
-        )
-        for planned in SUITE.operations
-    ]
-
-
-@pytest.mark.parametrize("operation_id", _operations())
+@pytest.mark.parametrize("operation_id", operation_params(SUITE))
 def test_spec_matches_api(operation_id: str, contract_run: ContractRun) -> None:
     assert_spec_matches_api(contract_run.result_for(operation_id), contract_run.files.report)

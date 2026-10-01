@@ -22,8 +22,9 @@ it sends 0, 1, 100 and 101. It then checks every response against the spec.
 | A suite: its operations, fixtures and tests | `integration-tests/response-validation/<module>/contract/` |
 | Output of a run | `integration-tests/reports/contract/<suite>/` (git ignores it) |
 
-There is one suite so far, `enterprise-search`: the operations under
-`/conversations`, `/search` and `/agents`.
+Every operation of the spec is in exactly one suite; a unit test fails when
+one is in none. `python -m helper.contract suites` lists the suites and how many
+operations each one sends, limits or skips.
 
 ## Running
 
@@ -32,14 +33,20 @@ tests, and it uses their fixtures and their login.
 
 ```bash
 cd integration-tests
-pytest -m contract                                  # the whole suite, about 4,300 requests
-pytest -m contract --collect-only -q                # list the tests; sends nothing
+pytest -m contract                                       # every suite
+pytest -m contract response-validation/enterprise-search # one suite
+pytest -m contract --collect-only -q                     # list the tests; sends nothing
 pytest "response-validation/enterprise-search/contract/integration_test_contract.py::test_spec_matches_api[GET /search]"
 ```
 
 **Use a deployment that holds no data anyone needs.** The run creates, changes
-and deletes conversations, agents and searches. It changes only what its
-fixtures and its own test cases created, and deletes both at the end.
+and deletes users, knowledge bases, conversations, agents and settings. It is
+written to change only what its fixtures and its own test cases created, and to
+delete both at the end; an operation that would do more is skipped, with the
+reason in the suite file.
+
+The suites run one after the other, also under pytest-xdist: they are all in
+one xdist group, because two of them must not change the same deployment at once.
 
 Selecting tests also selects what is sent: only the operations of the collected
 tests are run. Use node IDs for that; an operation label has characters that
@@ -48,18 +55,21 @@ tests are run. Use node IDs for that; an operation label has characters that
 The tests carry the marker `contract`, not `integration`, so the usual shards
 do not run them.
 
-Three commands work on files only and send nothing to PipesHub:
+These commands work on files only and send nothing to PipesHub:
 
 ```bash
 SUITE=response-validation/enterprise-search/contract/suite.yaml
 python -m helper.contract plan   $SUITE   # list every generated test case (plan.md)
 python -m helper.contract report $SUITE   # write the report of the last run again
 python -m helper.contract accept $SUITE   # make baseline.json say what the last run found
+python -m helper.contract index           # one page for the last run of every suite
+python -m helper.contract suites          # which suite has which operations
 ```
 
 ## Reading the result
 
-One test per operation. `report.md` in the output folder has the details.
+One test per operation. `report.md` in the output folder of the suite has the
+details; `index.md` one level up adds the suites of a session together.
 
 | pytest | Verdict | Meaning |
 |---|---|---|
@@ -78,6 +88,10 @@ One test per operation. `report.md` in the output folder has the details.
 2xx, so the success response was never checked; or, for an operation that is
 only sent invalid requests, none was answered with 400 or 422, so nothing shows
 that they reached its validation (a stale ID answers 404 to everything).
+
+"Incomplete" is also the verdict when a request was answered with 429. The rate
+limiter answered, not the operation, so the request says nothing about the spec.
+Lower the rate in the suite file (`rate_limit`, `operation_rate_limits`).
 
 If Schemathesis stops before the end, for example because the API stops
 answering, the whole run is an error and nothing is judged.
@@ -125,13 +139,40 @@ spec and fails, before any request is sent, when they do not agree.
 | `include_path_regex` | Which paths of the spec are in scope |
 | `path_parameters` | The value key for each path parameter, for example `conversationId: conversation.mutable.id` |
 | `values` | Query and body fields that get a real value, for example `body.filters.kb[*]: knowledgeBase.id` |
+| `values_by_operation` | The same for one operation; it wins over `values` |
+| `constants` | Value keys whose value the suite file gives itself, for example `connector.type: Confluence` |
 | `client_chosen_ids` | ID fields whose value the client is free to choose, each with a reason |
 | `ids_without_fixture` | ID fields that must name something that exists and have no fixture, each with a reason |
-| `negative_only` | Operations that are only sent invalid requests, because a valid one calls the LLM |
+| `negative_only` | Operations that are only sent invalid requests, in groups with a reason each (a valid one calls the LLM, sends an email, ...) |
 | `examples_only` | Operations whose valid requests are limited to the examples in the spec; all invalid ones are sent |
 | `no_success_response` | Operations for which no request can get a 2xx, each with a reason |
 | `created_resources` | What a successful test case creates, so the test can delete it |
 | `skip` | Operations that are not sent, each with a reason |
+| `auth` | How an operation logs in, where the spec does not decide it (see below) |
+| `rate_limit`, `operation_rate_limits` | A lower request rate for the suite or for one operation, for example `30/m` |
+
+A path parameter needs a value key unless the spec lists its values (`enum`):
+Schemathesis sends every listed value by itself.
+
+### Login
+
+The spec decides how each operation logs in:
+
+| The spec accepts | The request carries |
+|---|---|
+| `oauth2` (most operations) | The token of the integration-test OAuth client, as the fixtures do (`oauth_client`) |
+| only `bearerAuth` | The session token of the test user, from a password login (`session`) |
+| nothing (`security: []`) | No `Authorization` header (`none`) |
+| only another scheme (`scopedToken`) | Nothing by default: the suite must give a token or skip the operation |
+
+`auth` overrides this for one operation: `oauth_client`, `session`, `none`, or
+`{token: <value key>}` for a token that a fixture provides. `session` needs
+`PIPESHUB_TEST_USER_EMAIL` and `PIPESHUB_TEST_USER_PASSWORD`; without them the
+operations that need it are "Not run".
+
+The base path comes from the spec too: `/api/v1`, or none for the operations
+that the spec puts at the root (`/.well-known/...`, `/mcp`). One suite has one
+base path.
 
 ### Why IDs need real values
 
@@ -158,6 +199,11 @@ the gap would be invisible. Therefore:
 
 A value replaces a string that is already in the generated request. It is never
 added, and in an invalid request the field under test keeps its invalid value.
+The value must be one that the spec allows for its field. Schemathesis looks at
+the request again once the value is in, and if the spec forbids the value (a
+pattern, a format, an enum) it counts the request as invalid. When the API then
+accepts it, the run reports a difference, and rightly so: the spec does not
+describe the IDs that the API uses.
 No ID is taken from the response of an earlier request: that Schemathesis
 feature is off, so that a request does not depend on what ran before it.
 
@@ -170,14 +216,24 @@ archived for the unarchive operation, `linked` is already in a project for the
 project-visibility operation, and `disposable` is deleted by the DELETE
 operation under test.
 
+### Fixtures in the report
+
+`VALUE_SOURCES` in the suite's `conftest.py` lists every fixture that gives
+values: its value keys, how to read them, one sentence that says what it is, and
+whether it was `added` for the contract tests or was an `existing`
+integration-test fixture. The report and the plan have a "Fixtures" section made
+from that list, with the value each key had in the run, or why it had none.
+A value marked `secret` (a token) is not shown, and no file of the run has it.
+
 ## How a run works
 
 1. `suite.py` loads the suite and checks it against the spec (`fields.py` finds the ID fields).
-2. The suite's `conftest.py` collects the values from the fixtures.
+2. `pytest_support.py` collects the values from the fixtures that `VALUE_SOURCES` lists
+   (`sources.py`).
 3. `config.py` decides what is sent and writes the Schemathesis config of the run from
-   `schemathesis.base.toml`, the suite and the values.
-4. `runner.py` starts Schemathesis once. `hooks.py`, loaded by Schemathesis, logs in with the
-   integration-test client and puts the real values into query and body fields (`values.py`).
+   `schemathesis.base.toml` and the suite.
+4. `runner.py` starts Schemathesis once for the suite. `hooks.py`, loaded by Schemathesis, logs
+   each operation in and puts the real values into path, query and body (`values.py`).
 5. `events.py` reads the NDJSON report; `results.py` turns failed checks into differences,
    compares them with the baseline (`baseline.py`) and gives each operation a verdict.
 6. `report.py` writes `report.md` and `report.json`; `outcome.py` turns a verdict into a
@@ -195,10 +251,12 @@ Files of a run, in `reports/contract/<suite>/run/`: `report.md`, `report.json`,
 ## Adding a suite
 
 1. Create `response-validation/<module>/contract/` with a `suite.yaml`, an empty
-   `baseline.json`, a `conftest.py` and a test module; copy them from `enterprise-search`.
+   `baseline.json`, a `conftest.py` and `integration_test_contract.py`; copy them from
+   `enterprise-search`. The folder must be named `contract`.
 2. Run `python -m helper.contract plan <suite.yaml>`. It tells you which path
-   parameters and ID fields the suite has not decided on yet.
-3. Provide the values from that module's fixtures in `VALUE_SOURCES`.
+   parameters, ID fields and logins the suite has not decided on yet.
+3. Write the fixtures in the suite's `conftest.py`, list them in `VALUE_SOURCES`, and end
+   the file with `contract_values, contract_run = suite_fixtures(SUITE_PATH, VALUE_SOURCES)`.
    `unit/test_contract_fixtures.py` checks that every key the suite names is provided.
 
 ## Tests of this library

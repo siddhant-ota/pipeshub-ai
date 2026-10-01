@@ -11,13 +11,15 @@ from typing import Any
 import tomli_w
 
 from helper.contract.suite import (
+    AUTH_OAUTH_CLIENT,
+    AUTH_TOKEN,
     PROFILE_EXAMPLES_ONLY,
     PROFILE_NEGATIVE_ONLY,
     PROFILE_SKIP,
     PlannedOperation,
     Suite,
 )
-from helper.contract.values import ContractValues
+from helper.contract.values import PATH, ContractValues
 
 CONTRACT_DIR = Path(__file__).resolve().parent
 BASE_CONFIG_PATH = CONTRACT_DIR / "schemathesis.base.toml"
@@ -25,6 +27,10 @@ HOOKS_PATH = CONTRACT_DIR / "hooks.py"
 
 # Environment of the Schemathesis process, read by hooks.py.
 SUBSTITUTIONS_ENV = "CONTRACT_SUBSTITUTIONS"
+LOGINS_ENV = "CONTRACT_LOGINS"
+# The tokens that fixtures provide. In the environment, not in a file: they are credentials.
+TOKENS_ENV = "CONTRACT_TOKENS"
+BASE_URL_ENV = "CONTRACT_BASE_URL"
 # Set by `plan`, which talks to a stub and has nothing to log in to.
 STATIC_AUTHORIZATION_ENV = "CONTRACT_STATIC_AUTHORIZATION"
 
@@ -36,7 +42,7 @@ STATE_EXAMPLES_ONLY = "examples_only"
 STATE_NEGATIVE_ONLY = "negative_only"
 # The suite file skips the operation.
 STATE_SKIPPED = "skipped"
-# A value the operation needs could not be created.
+# A value or a login that the operation needs is not there.
 STATE_VALUE_MISSING = "value_missing"
 # Not selected for this run.
 STATE_DESELECTED = "deselected"
@@ -56,6 +62,7 @@ class OperationRun:
     # Fields that must name something that exists and have no fixture value;
     # see results._names_nothing_real.
     fixtureless_fields: tuple[str, ...] = ()
+    auth: str = AUTH_OAUTH_CLIENT
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OperationRun:
@@ -77,6 +84,8 @@ def _state_for(
         return STATE_DESELECTED, "Not selected for this run."
     if planned.profile == PROFILE_SKIP:
         return STATE_SKIPPED, planned.reason
+    if planned.auth in values.no_login:
+        return STATE_VALUE_MISSING, f"No `{planned.auth}` login: {values.no_login[planned.auth]}"
     missing = sorted(key for key in planned.value_keys if key not in values.values)
     if missing:
         reasons = "; ".join(
@@ -108,14 +117,17 @@ def plan_run(
                 reason=reason,
                 no_success_reason=planned.no_success_reason,
                 fixtureless_fields=planned.fixtureless_fields,
+                auth=planned.auth,
             )
         )
     return runs
 
 
-def build_config(suite: Suite, values: ContractValues, runs: list[OperationRun]) -> dict[str, Any]:
+def build_config(suite: Suite, runs: list[OperationRun]) -> dict[str, Any]:
     config = tomllib.loads(BASE_CONFIG_PATH.read_text(encoding="utf-8"))
     config["hooks"] = str(HOOKS_PATH)
+    if suite.rate_limit:
+        config["rate-limit"] = suite.rate_limit
 
     run_by_id = {run.operation_id: run for run in runs}
     blocks: list[dict[str, Any]] = []
@@ -127,10 +139,8 @@ def build_config(suite: Suite, values: ContractValues, runs: list[OperationRun])
             block["enabled"] = False
             blocks.append(block)
             continue
-        if planned.path_values:
-            block["parameters"] = {
-                f"path.{name}": values.values[key] for name, key in planned.path_values.items()
-            }
+        if planned.rate_limit:
+            block["rate-limit"] = planned.rate_limit
         if run.state in (STATE_NEGATIVE_ONLY, STATE_EXAMPLES_ONLY):
             # This limits the coverage phase to invalid requests. The examples phase still
             # sends the spec's own examples, which are valid requests. (A mode set for the
@@ -145,17 +155,39 @@ def build_config(suite: Suite, values: ContractValues, runs: list[OperationRun])
     return config
 
 
+def _sent(suite: Suite, runs: list[OperationRun]) -> list[PlannedOperation]:
+    sent = {run.operation_id for run in runs if run.is_sent}
+    return [planned for planned in suite.operations if planned.operation.operation_id in sent]
+
+
 def build_substitutions(
     suite: Suite, values: ContractValues, runs: list[OperationRun]
 ) -> dict[str, dict[str, str]]:
     """Operation label -> request field -> value, for `hooks.py`."""
-    sent = {run.operation_id for run in runs if run.is_sent}
-    return {
-        planned.operation.label: {
-            field_name: values.values[key] for field_name, key in planned.field_values.items()
+    substitutions: dict[str, dict[str, str]] = {}
+    for planned in _sent(suite, runs):
+        fields = {
+            **{f"{PATH}.{name}": key for name, key in planned.path_values.items()},
+            **planned.field_values,
         }
-        for planned in suite.operations
-        if planned.operation.operation_id in sent and planned.field_values
+        if fields:
+            substitutions[planned.operation.label] = {
+                field_name: values.values[key] for field_name, key in fields.items()
+            }
+    return substitutions
+
+
+def build_logins(suite: Suite, runs: list[OperationRun]) -> dict[str, str]:
+    """Operation label -> how the request logs in, for `hooks.py`."""
+    return {planned.operation.label: planned.auth for planned in _sent(suite, runs)}
+
+
+def build_tokens(suite: Suite, values: ContractValues, runs: list[OperationRun]) -> dict[str, str]:
+    """Operation label -> the token a fixture provides for it."""
+    return {
+        planned.operation.label: values.values[planned.token_key]
+        for planned in _sent(suite, runs)
+        if planned.auth == AUTH_TOKEN
     }
 
 
@@ -164,6 +196,6 @@ def write_config(config: dict[str, Any], path: Path) -> None:
     path.write_bytes(tomli_w.dumps(config).encode("utf-8"))
 
 
-def write_substitutions(substitutions: dict[str, dict[str, str]], path: Path) -> None:
+def write_json(content: dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(substitutions, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(content, indent=2), encoding="utf-8")

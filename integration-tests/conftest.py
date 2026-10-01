@@ -800,6 +800,13 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
         )
 
 
+def pytest_terminal_summary(terminalreporter: pytest.TerminalReporter) -> None:
+    """Say what the API contract suites of this session covered (``-m contract``)."""
+    from helper.contract.pytest_support import terminal_summary
+
+    terminal_summary(terminalreporter)
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Write integration test HTML report under reports/ with timestamp."""
     by_nodeid: Dict[str, TestReportEntry] | None = getattr(

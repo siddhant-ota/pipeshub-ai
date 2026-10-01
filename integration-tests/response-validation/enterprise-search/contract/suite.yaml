@@ -85,10 +85,15 @@ values:
   body.models[*].provider: llm.provider
   body.knowledge[*].connectorId: knowledgeBase.id
   body.knowledge[*].filters.records[*]: knowledgeBase.recordId
-  # The API accepts only a 24-hex ObjectId here (es_validators.ts), and the IDs
-  # of indexed records are UUIDs, so there is no real value to give. A
-  # well-formed one keeps this field from being the reason a request is rejected.
   body.recordIds[*]: record.wellFormedId
+
+# Values that the suite file gives itself.
+constants:
+  # The API accepts only a 24-hex ObjectId for `recordIds` (es_validators.ts),
+  # and the IDs of indexed records are UUIDs, so there is no real value to give.
+  # A well-formed one keeps the field from being the reason the API rejects an
+  # invalid request, which would hide whether it rejects the invalid part.
+  record.wellFormedId: "000000000000000000000000"
 
 # ID fields whose value the client is free to choose. They keep the generated
 # value, and a request with one is judged like any other.
@@ -118,25 +123,25 @@ ids_without_fixture:
 # reaches the LLM, so these runs cost nothing and still check validation.
 # The success response of these operations is not checked.
 negative_only:
-  reason: A valid request calls the LLM.
-  operations:
-    - createConversation
-    - streamChat
-    - addMessage
-    - addMessageStream
-    - regenerateAnswer
-    - createAgentConversation
-    - streamAgentConversation
-    - addAgentConversationMessage
-    - streamAgentConversationMessage
-    - regenerateAgentConversationMessage
+  - reason: A valid request calls the LLM.
+    operations:
+      - createConversation
+      - streamChat
+      - addMessage
+      - addMessageStream
+      - regenerateAnswer
+      - createAgentConversation
+      - streamAgentConversation
+      - addAgentConversationMessage
+      - streamAgentConversationMessage
+      - regenerateAgentConversationMessage
 
 # All invalid requests are sent. Of the valid ones, only the examples that the
 # spec gives, so the success response is still checked.
 examples_only:
-  reason: Every valid search makes two LLM calls (query rewrite and expansion).
-  operations:
-    - search
+  - reason: Every valid search makes two LLM calls (query rewrite and expansion).
+    operations:
+      - search
 
 # Resources that a successful test case creates; the test deletes them at the end.
 # `{id}` is the value at `id_pointer` in the response; other `{...}` are value keys.

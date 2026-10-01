@@ -15,7 +15,7 @@ from helper.contract.config import (
     STATE_SKIPPED,
     STATE_VALUE_MISSING,
 )
-from helper.contract.report import render_report, summary_lines
+from helper.contract.report import render_index, render_report, summary_lines
 from helper.contract.results import (
     NEGATIVE_REJECTION,
     POSITIVE_ACCEPTANCE,
@@ -36,6 +36,8 @@ from helper.contract.results import (
     OperationResult,
     collect,
 )
+from helper.contract.sources import FixtureRow
+from helper.contract.values import ContractValues
 
 pytestmark = pytest.mark.unit
 
@@ -438,6 +440,21 @@ def test_a_request_without_a_response_makes_the_operation_incomplete(tmp_path: P
     assert "did not complete" in result.gap
 
 
+def test_a_rate_limited_request_is_not_judged(tmp_path: Path) -> None:
+    """Schemathesis takes a 429 as "rejected", so an invalid request it hides would pass."""
+    limited = case_event(
+        LIST, case_id="c2", status=429, mode="negative", passed=(NEGATIVE_REJECTION,)
+    )
+
+    result = _collect(tmp_path, [VALID, limited], baseline={LIMIT_KEY})
+
+    assert result.verdict == VERDICT_INCOMPLETE
+    assert result.rate_limited == 1
+    assert not result.findings and not result.stale
+    assert "turned away by a rate limit" in result.gap
+    assert "`operation_rate_limits`" in result.gap
+
+
 def test_a_scenario_that_schemathesis_could_not_finish_makes_the_operation_incomplete(
     tmp_path: Path,
 ) -> None:
@@ -621,3 +638,41 @@ def test_report_of_a_clean_run(tmp_path: Path) -> None:
 
     assert "**Contract: MATCHES**" in report
     assert "**Coverage: COMPLETE**" in report
+    assert "## Fixtures" not in report
+
+
+def test_report_says_where_the_values_came_from(tmp_path: Path) -> None:
+    values = ContractValues(
+        values={"thing.id": "T-1", "thing.token": "do-not-print"},
+        missing={"project.id": "fixture `contract_project` failed: HTTP 500"},
+    )
+    rows = [
+        FixtureRow(
+            "contract_things", ("thing.id",), "One thing.", True, operations=("deleteThing",)
+        ),
+        FixtureRow("thing_token", ("thing.token",), "A token.", False, secret=True),
+        FixtureRow("contract_project", ("project.id",), "One project.", True),
+    ]
+
+    report = render_report(
+        [_collect(tmp_path, [VALID])], META, [row.with_values(values) for row in rows]
+    )
+
+    assert "| `contract_things` | added | One thing. | `thing.id` = `T-1` | 1 |" in report
+    assert "| `thing_token` | existing | A token. | `thing.token` = `(secret)` | 0 |" in report
+    assert "**no value** — fixture `contract_project` failed: HTTP 500" in report
+    assert "do-not-print" not in report
+
+
+def test_index_adds_up_the_suites(tmp_path: Path) -> None:
+    other = {**META, "suite": "others"}
+    clean = _collect(tmp_path, [VALID])
+    differs = _collect(tmp_path, [VALID, LIMIT_ABOVE_MAXIMUM])
+
+    index = render_index(
+        [(META, [clean], tmp_path / "things.md"), (other, [differs], tmp_path / "others.md")]
+    )
+
+    assert "**Contract: DIFFERS** — 1 new difference(s)" in index
+    assert f"| [things]({tmp_path / 'things.md'}) | now | 1 |" in index
+    assert index.index("[others]") < index.index("[things]")

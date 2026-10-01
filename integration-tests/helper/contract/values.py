@@ -1,10 +1,10 @@
 """Real values for request fields: what the fixtures give, and how a request gets them.
 
-Path parameters go through Schemathesis' own `parameters` config. It cannot
-set a body field in its coverage phase, and a forced query value would be added
-to every request, so `hooks.py` puts body and query values in with the
-functions below. A value replaces a string that is already in the request; it
-is never added, and the field under test in a negative case is left alone.
+`hooks.py` puts the values into each request with the functions below, just
+before it is sent. Schemathesis has its own setting for this, but it replaces
+the value in every request, also in the one that tests that very parameter.
+Here the field under test in an invalid request is left alone. A query or body
+value replaces a string that is already in the request; it is never added.
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from helper.contract.fields import ANY_ITEM, ARRAY_ITEM, pointer_path
 
 BODY = "body"
 QUERY = "query"
+PATH = "path"
+_LOCATIONS = (BODY, QUERY, PATH)
 
 
 @dataclass
@@ -25,6 +27,10 @@ class ContractValues:
     values: dict[str, str] = field(default_factory=dict)
     # value key -> why the fixture that provides it failed
     missing: dict[str, str] = field(default_factory=dict)
+    # way to log in (`session`, ...) -> why this run cannot use it
+    no_login: dict[str, str] = field(default_factory=dict)
+    # Value keys whose values are credentials; no file of the run shows them.
+    secret: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -44,7 +50,7 @@ class Mutation:
     """What a negative test case made invalid, as Schemathesis reports it."""
 
     location: str
-    # Query: the parameter name. Body: the media type.
+    # Path and query: the parameter name. Body: the media type.
     parameter: str
     # Body: where in the schema, for example `/properties/filters/properties/kb/items/type`.
     schema_pointer: str
@@ -53,8 +59,10 @@ class Mutation:
 def parse_field(field_name: str) -> tuple[str, tuple[str, ...]]:
     """`body.filters.kb[*]` -> (`body`, (`filters`, `kb`, `*`))."""
     location, _, rest = field_name.partition(".")
-    if location not in (BODY, QUERY) or not rest:
-        raise ValueError(f"A request field starts with `body.` or `query.`: {field_name!r}")
+    if location not in _LOCATIONS or not rest:
+        raise ValueError(
+            f"A request field starts with `body.`, `query.` or `path.`: {field_name!r}"
+        )
     path: list[str] = []
     for part in rest.split("."):
         name = part
@@ -69,7 +77,7 @@ def is_under_test(substitution: Substitution, mutation: Mutation | None) -> bool
     """True if the negative case made this very field, or what contains it, invalid."""
     if mutation is None or mutation.location != substitution.location:
         return False
-    if substitution.location == QUERY:
+    if substitution.location in (QUERY, PATH):
         return mutation.parameter == substitution.path[0]
     mutated = pointer_path(mutation.schema_pointer)
     shared = min(len(mutated), len(substitution.path))

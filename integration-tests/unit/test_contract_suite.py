@@ -7,13 +7,19 @@ path parameter or ID field in scope has to be decided on in the suite file.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from contract_samples import SPEC, SUITE, write_suite
 
 from helper.contract.fields import field_name, pointer_path, request_fields
+from helper.contract.runner import SUITES_ROOT, suite_paths
 from helper.contract.spec import operations_in_scope
 from helper.contract.suite import (
+    AUTH_NONE,
+    AUTH_OAUTH_CLIENT,
+    AUTH_SESSION,
+    AUTH_TOKEN,
     PROFILE_EXAMPLES_ONLY,
     PROFILE_FULL,
     PROFILE_NEGATIVE_ONLY,
@@ -24,19 +30,19 @@ from helper.contract.suite import (
 
 pytestmark = pytest.mark.unit
 
-SUITES = sorted(
-    (Path(__file__).resolve().parents[1] / "response-validation").glob("**/contract/suite.yaml")
-)
+SUITES = suite_paths()
 
 
-@pytest.mark.parametrize("suite_path", SUITES, ids=lambda path: path.parent.parent.name)
+def _suite_id(suite_path: Path) -> str:
+    return str(suite_path.parent.relative_to(SUITES_ROOT))
+
+
+@pytest.mark.parametrize("suite_path", SUITES, ids=_suite_id)
 def test_every_suite_in_the_repository_agrees_with_the_spec(suite_path: Path) -> None:
     suite = load_suite(suite_path)
 
     assert suite.operations
-    for planned in suite.operations:
-        if planned.profile != PROFILE_SKIP:
-            assert set(planned.path_values) == set(planned.operation.path_parameters)
+    assert suite.name not in {load_suite(other).name for other in SUITES if other != suite_path}
 
 
 def test_operations_in_scope_follow_the_path_filter() -> None:
@@ -132,7 +138,7 @@ def test_suite_gives_each_operation_its_values(tmp_path: Path) -> None:
     suite = load_suite(
         write_suite(
             tmp_path,
-            negative_only={"reason": "Costs money.", "operations": ["createThing"]},
+            negative_only=[{"reason": "Costs money.", "operations": ["createThing"]}],
             skip=[{"operation": "deleteThing", "reason": "Destructive."}],
         ),
         SPEC,
@@ -156,7 +162,7 @@ def test_suite_gives_each_operation_its_values(tmp_path: Path) -> None:
 
 def test_an_examples_only_operation(tmp_path: Path) -> None:
     suite = load_suite(
-        write_suite(tmp_path, examples_only={"reason": "Slow.", "operations": ["listThings"]}),
+        write_suite(tmp_path, examples_only=[{"reason": "Slow.", "operations": ["listThings"]}]),
         SPEC,
     )
     by_id = {planned.operation.operation_id: planned for planned in suite.operations}
@@ -187,8 +193,8 @@ def test_an_examples_only_operation(tmp_path: Path) -> None:
         ),
         (
             {
-                "negative_only": {"operations": ["listThings"]},
-                "examples_only": {"operations": ["listThings"]},
+                "negative_only": [{"reason": "x", "operations": ["listThings"]}],
+                "examples_only": [{"reason": "x", "operations": ["listThings"]}],
             },
             "listThings is in `examples_only` and in another list",
         ),
@@ -197,7 +203,19 @@ def test_an_examples_only_operation(tmp_path: Path) -> None:
                 "ids_without_fixture": [],
                 "values": {**SUITE["values"], "body.notes{*}.authorId": "user.id"},
             },
-            "`values` cannot set a field under a free-form key",
+            "a field under a free-form key cannot get a value",
+        ),
+        (
+            {"values": {**SUITE["values"], "path.thingId": "thing.id"}},
+            "path parameters get their value under `path_parameters`: path.thingId",
+        ),
+        (
+            {"values_by_operation": {"listThings": {"body.name": "thing.name"}}},
+            "`values_by_operation` names field(s) it does not have: body.name",
+        ),
+        (
+            {"auth": {"listThings": "cookie"}},
+            "`auth` must be one of oauth_client, session, none or `{token: <value key>}`",
         ),
     ],
 )
@@ -216,3 +234,146 @@ def test_suite_reports_every_problem_at_once(tmp_path: Path) -> None:
 
     assert "thingId" in str(error.value)
     assert "body.ownerId" in str(error.value)
+
+
+def test_a_value_for_one_operation_wins_over_the_value_for_the_suite(tmp_path: Path) -> None:
+    suite = load_suite(
+        write_suite(
+            tmp_path,
+            values_by_operation={
+                "listThings": {"query.projectId": "project.other.id"},
+                "createThing": {"body.name": "thing.name", "body.ownerId": "user.id"},
+            },
+        ),
+        SPEC,
+    )
+    by_id = {planned.operation.operation_id: planned for planned in suite.operations}
+
+    assert by_id["listThings"].field_values == {"query.projectId": "project.other.id"}
+    # A field that holds no ID can get a value too, and so can one the suite lists otherwise.
+    assert by_id["createThing"].field_values["body.name"] == "thing.name"
+    assert by_id["createThing"].field_values["body.ownerId"] == "user.id"
+
+
+def test_a_constant_is_a_value_that_needs_no_fixture(tmp_path: Path) -> None:
+    suite = load_suite(
+        write_suite(
+            tmp_path,
+            constants={"kb.id": "KB-1"},
+        ),
+        SPEC,
+    )
+
+    assert suite.constants == {"kb.id": "KB-1"}
+    assert "kb.id" in suite.value_keys
+    assert "kb.id" not in suite.fixture_keys
+
+
+def _secured(security: list[dict[str, list]] | None, **operation: Any) -> dict[str, Any]:
+    definition: dict[str, Any] = {"operationId": "getThing", "responses": {"200": {}}, **operation}
+    if security is not None:
+        definition["security"] = security
+    return {
+        "servers": [{"url": "{instance_url}/api/v1"}],
+        "security": [{"bearerAuth": []}, {"oauth2": []}],
+        "paths": {"/thing": {"get": definition}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("security", "login"),
+    [
+        # The default of the spec: a session token or an OAuth token.
+        (None, AUTH_OAUTH_CLIENT),
+        ([{"bearerAuth": []}], AUTH_SESSION),
+        ([], AUTH_NONE),
+    ],
+)
+def test_the_spec_decides_how_an_operation_logs_in(
+    tmp_path: Path, security: list | None, login: str
+) -> None:
+    suite = load_suite(
+        write_suite(
+            tmp_path,
+            include_path_regex="^/thing$",
+            path_parameters={},
+            values={},
+            client_chosen_ids=[],
+            ids_without_fixture=[],
+        ),
+        _secured(security),
+    )
+
+    assert [planned.auth for planned in suite.operations] == [login]
+    assert suite.logins == {login}
+    assert suite.api_prefix == "/api/v1"
+
+
+def test_an_operation_that_takes_a_special_token_needs_a_decision(tmp_path: Path) -> None:
+    empty = {
+        "include_path_regex": "^/thing$",
+        "path_parameters": {},
+        "values": {},
+        "client_chosen_ids": [],
+        "ids_without_fixture": [],
+    }
+    spec = _secured([{"scopedToken": []}])
+
+    with pytest.raises(SuiteError, match="the spec accepts only scopedToken"):
+        load_suite(write_suite(tmp_path, **empty), spec)
+
+    suite = load_suite(
+        write_suite(tmp_path, **empty, auth={"getThing": {"token": "thing.token"}}), spec
+    )
+    (planned,) = suite.operations
+    assert (planned.auth, planned.token_key) == (AUTH_TOKEN, "thing.token")
+    assert planned.value_keys == {"thing.token"}
+
+
+def test_a_root_level_operation_has_no_api_prefix(tmp_path: Path) -> None:
+    empty = {
+        "include_path_regex": "^/thing",
+        "path_parameters": {},
+        "values": {},
+        "client_chosen_ids": [],
+        "ids_without_fixture": [],
+    }
+    spec = _secured(None, servers=[{"url": "/"}])
+
+    assert load_suite(write_suite(tmp_path, **empty), spec).api_prefix == ""
+
+    spec["paths"]["/things"] = {"get": {"operationId": "listThings", "responses": {"200": {}}}}
+    with pytest.raises(SuiteError, match="do not have one base path"):
+        load_suite(write_suite(tmp_path, **empty), spec)
+
+
+def test_a_path_parameter_with_listed_values_needs_no_value(tmp_path: Path) -> None:
+    spec = {
+        "paths": {
+            "/things/{kind}/{thingId}": {
+                "get": {
+                    "operationId": "getThing",
+                    "parameters": [
+                        {
+                            "name": "kind",
+                            "in": "path",
+                            "schema": {"type": "string", "enum": ["a", "b"]},
+                        },
+                        {"name": "thingId", "in": "path", "schema": {"type": "string"}},
+                    ],
+                }
+            }
+        }
+    }
+    keys = {
+        "include_path_regex": "^/things",
+        "values": {},
+        "client_chosen_ids": [],
+        "ids_without_fixture": [],
+    }
+
+    (planned,) = load_suite(write_suite(tmp_path, **keys), spec).operations
+    assert planned.path_values == {"thingId": "thing.id"}
+
+    with pytest.raises(SuiteError, match=r"no value for path parameter\(s\) thingId$"):
+        load_suite(write_suite(tmp_path, **keys, path_parameters={}), spec)

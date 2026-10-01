@@ -8,35 +8,45 @@ import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
-import schemathesis
-
 from helper.contract.baseline import load_baseline
 from helper.contract.config import (
+    BASE_URL_ENV,
+    LOGINS_ENV,
     STATIC_AUTHORIZATION_ENV,
     SUBSTITUTIONS_ENV,
+    TOKENS_ENV,
     OperationRun,
     build_config,
+    build_logins,
     build_substitutions,
+    build_tokens,
     plan_run,
     write_config,
-    write_substitutions,
+    write_json,
 )
-from helper.contract.events import API_PREFIX
 from helper.contract.report import write_plan, write_report
 from helper.contract.results import OperationResult, collect
+from helper.contract.sources import SECRET, FixtureRow
 from helper.contract.spec import SPEC_PATH
 from helper.contract.stub_server import stub_server
 from helper.contract.suite import Suite
 from helper.contract.values import ContractValues
 
 INTEGRATION_TESTS_DIR = Path(__file__).resolve().parents[2]
+# A suite is a folder named `contract` with these files, under this root.
+SUITES_ROOT = INTEGRATION_TESTS_DIR / "response-validation"
+SUITE_NAME = "suite.yaml"
+BASELINE_NAME = "baseline.json"
 # Where runs are written. CONTRACT_REPORTS_DIR moves it, for example to a CI artifact folder.
 REPORTS_DIR = Path(
     os.getenv("CONTRACT_REPORTS_DIR") or INTEGRATION_TESTS_DIR / "reports" / "contract"
 )
+# One page for the last run of every suite.
+INDEX_PATH = REPORTS_DIR / "index.md"
 
 # 0: every check passed. 1: some failed. Anything else: Schemathesis could not run.
 _COMPLETED_EXIT_CODES = (0, 1)
@@ -97,6 +107,11 @@ class ContractRun:
         return next(result for result in self.results if result.run.operation_id == operation_id)
 
 
+def suite_paths() -> list[Path]:
+    """The suite file of every contract suite in the repository."""
+    return sorted(SUITES_ROOT.glob(f"**/contract/{SUITE_NAME}"))
+
+
 def run_files(suite: Suite, kind: str = "run") -> RunFiles:
     directory = REPORTS_DIR / suite.name / kind
     directory.mkdir(parents=True, exist_ok=True)
@@ -121,7 +136,7 @@ def _meta(suite: Suite, target: str, config: dict[str, Any]) -> dict[str, Any]:
         "suite": suite.name,
         "target": target,
         "time": datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
-        "schemathesis": schemathesis.__version__,
+        "schemathesis": version("schemathesis"),
         "seed": config.get("seed"),
         "spec_commit": _spec_commit(),
     }
@@ -190,12 +205,28 @@ def _discard_previous_run(files: RunFiles) -> None:
 
 def _prepare(
     suite: Suite, values: ContractValues, files: RunFiles, selected: set[str] | None
-) -> tuple[list[OperationRun], dict[str, Any]]:
+) -> tuple[list[OperationRun], dict[str, Any], dict[str, str]]:
+    """Plan the run and write its config. Returns the runs, the config and the hook environment."""
     runs = plan_run(suite, values, selected)
-    config = build_config(suite, values, runs)
+    config = build_config(suite, runs)
     write_config(config, files.config)
-    write_substitutions(build_substitutions(suite, values, runs), files.substitutions)
-    return runs, config
+    substitutions = build_substitutions(suite, values, runs)
+    secrets = {values.values[key] for key in values.secret if key in values.values}
+    # For reading. The hooks get the values through the environment, where a credential
+    # among them does not end up in a report folder.
+    write_json(
+        {
+            label: {name: SECRET if value in secrets else value for name, value in fields.items()}
+            for label, fields in substitutions.items()
+        },
+        files.substitutions,
+    )
+    env = {
+        SUBSTITUTIONS_ENV: json.dumps(substitutions),
+        LOGINS_ENV: json.dumps(build_logins(suite, runs)),
+        TOKENS_ENV: json.dumps(build_tokens(suite, values, runs)),
+    }
+    return runs, config, env
 
 
 def execute(
@@ -205,23 +236,23 @@ def execute(
     base_url: str,
     baseline_path: Path | None = None,
     selected: set[str] | None = None,
+    fixtures: list[FixtureRow] | None = None,
 ) -> ContractRun:
     """Send the suite's test cases to the deployment at `base_url` and judge the answers."""
     files = run_files(suite)
     _discard_previous_run(files)
-    runs, config = _prepare(suite, values, files, selected)
-    meta = _meta(suite, f"{base_url}{API_PREFIX}", config)
-    files.manifest.write_text(
-        json.dumps({"meta": meta, "runs": [asdict(run) for run in runs]}, indent=2),
-        encoding="utf-8",
+    runs, config, env = _prepare(suite, values, files, selected)
+    api_url = f"{base_url}{suite.api_prefix}"
+    write_json(
+        {
+            "meta": _meta(suite, api_url, config),
+            "runs": [asdict(run) for run in runs],
+            "fixtures": [asdict(row.with_values(values)) for row in fixtures or []],
+        },
+        files.manifest,
     )
     if any(run.is_sent for run in runs):
-        _run_schemathesis(
-            suite,
-            files,
-            api_url=f"{base_url}{API_PREFIX}",
-            env={SUBSTITUTIONS_ENV: str(files.substitutions)},
-        )
+        _run_schemathesis(suite, files, api_url=api_url, env={**env, BASE_URL_ENV: base_url})
     return judge(suite, baseline_path)
 
 
@@ -235,11 +266,14 @@ def judge(suite: Suite, baseline_path: Path | None = None) -> ContractRun:
     operation_ids = {planned.operation.operation_id for planned in suite.operations}
     baseline = load_baseline(baseline_path, operation_ids) if baseline_path else set()
     results = collect(runs, files.events, baseline)
-    write_report(results, saved["meta"], files.directory)
+    fixtures = [FixtureRow.from_dict(row) for row in saved.get("fixtures") or []]
+    write_report(results, saved["meta"], fixtures, files.directory)
     return ContractRun(suite, files, saved["meta"], tuple(results))
 
 
-def plan(suite: Suite, selected: set[str] | None = None) -> Path:
+def plan(
+    suite: Suite, selected: set[str] | None = None, fixtures: list[FixtureRow] | None = None
+) -> Path:
     """List the test cases Schemathesis generates for the suite. Needs no deployment.
 
     The cases go to a local stub that answers `{}`, so no check is switched on:
@@ -247,19 +281,23 @@ def plan(suite: Suite, selected: set[str] | None = None) -> Path:
     """
     files = run_files(suite, "plan")
     _discard_previous_run(files)
-    values = ContractValues(values=dict.fromkeys(suite.value_keys, _PLACEHOLDER))
-    runs, config = _prepare(suite, values, files, selected)
-    config.pop("rate-limit", None)
+    values = ContractValues(
+        values={**dict.fromkeys(suite.fixture_keys, _PLACEHOLDER), **suite.constants}
+    )
+    runs, config, env = _prepare(suite, values, files, selected)
+    # The stub needs no rate limit.
+    for limited in (config, *config["operations"]):
+        limited.pop("rate-limit", None)
+    config["operations"] = [block for block in config["operations"] if len(block) > 1]
     config["checks"] = {"enabled": False}
     write_config(config, files.config)
     with stub_server() as url:
         _run_schemathesis(
             suite,
             files,
-            api_url=f"{url}{API_PREFIX}",
-            env={
-                SUBSTITUTIONS_ENV: str(files.substitutions),
-                STATIC_AUTHORIZATION_ENV: "Bearer plan",
-            },
+            api_url=f"{url}{suite.api_prefix}",
+            env={**env, BASE_URL_ENV: url, STATIC_AUTHORIZATION_ENV: "Bearer plan"},
         )
-    return write_plan(runs, files.events, _meta(suite, "local stub", config), files.directory)
+    return write_plan(
+        runs, files.events, _meta(suite, "local stub", config), fixtures or [], files.directory
+    )

@@ -31,6 +31,7 @@ from helper.contract.results import (
     Finding,
     OperationResult,
 )
+from helper.contract.sources import FixtureRow
 
 _VERDICT_TEXT = {
     VERDICT_MISMATCH: (
@@ -116,6 +117,40 @@ def _finding_lines(finding: Finding) -> list[str]:
     return lines
 
 
+def _fixture_section(fixtures: list[FixtureRow], *, with_values: bool) -> list[str]:
+    """The fixtures of the suite: what each one is, and the values it gave."""
+    if not fixtures:
+        return []
+
+    def _values(row: FixtureRow) -> str:
+        if not with_values:
+            return ", ".join(f"`{key}`" for key in row.keys)
+        if row.problem:
+            return f"**no value** — {row.problem}"
+        return ", ".join(f"`{key}` = `{row.values.get(key, '')}`" for key in row.keys)
+
+    return [
+        "## Fixtures",
+        "",
+        "Where the real values in the requests come from. `added` is a fixture that was written",
+        "for the contract tests; `existing` is one that the integration tests already had.",
+        "",
+        *_table(
+            ["Fixture", "Origin", "What it is", "Values", "Operations that use it"],
+            [
+                [
+                    f"`{row.fixture}`",
+                    "added" if row.added else "existing",
+                    row.what,
+                    _values(row),
+                    len(row.operations),
+                ]
+                for row in sorted(fixtures, key=lambda row: (not row.added, row.fixture))
+            ],
+        ),
+    ]
+
+
 def _headline(results: list[OperationResult]) -> tuple[str, str]:
     """The two sentences that say how the run went: the contract, and how much of it was checked."""
     new = sum(len(result.new_findings) for result in results)
@@ -145,7 +180,9 @@ def summary_lines(results: list[OperationResult]) -> list[str]:
     ]
 
 
-def render_report(results: list[OperationResult], meta: dict[str, Any]) -> str:
+def render_report(
+    results: list[OperationResult], meta: dict[str, Any], fixtures: list[FixtureRow] | None = None
+) -> str:
     results = [result for result in results if result.verdict != VERDICT_DESELECTED]
     verdicts = Counter(result.verdict for result in results)
     gaps = [result for result in results if result.gap]
@@ -267,12 +304,16 @@ def render_report(results: list[OperationResult], meta: dict[str, Any]) -> str:
         ]
     if ignored or unjudged:
         lines.append("")
+    lines += _fixture_section(fixtures or [], with_values=True)
     return "\n".join(lines)
 
 
-def report_json(results: list[OperationResult], meta: dict[str, Any]) -> dict[str, Any]:
+def report_json(
+    results: list[OperationResult], meta: dict[str, Any], fixtures: list[FixtureRow] | None = None
+) -> dict[str, Any]:
     return {
         "meta": meta,
+        "fixtures": [asdict(row) for row in fixtures or []],
         "operations": [
             {
                 **asdict(result.run),
@@ -303,14 +344,68 @@ def report_json(results: list[OperationResult], meta: dict[str, Any]) -> dict[st
     }
 
 
-def write_report(results: list[OperationResult], meta: dict[str, Any], directory: Path) -> None:
-    (directory / "report.md").write_text(render_report(results, meta), encoding="utf-8")
+def write_report(
+    results: list[OperationResult],
+    meta: dict[str, Any],
+    fixtures: list[FixtureRow],
+    directory: Path,
+) -> None:
+    (directory / "report.md").write_text(render_report(results, meta, fixtures), encoding="utf-8")
     (directory / "report.json").write_text(
-        json.dumps(report_json(results, meta), indent=2), encoding="utf-8"
+        json.dumps(report_json(results, meta, fixtures), indent=2), encoding="utf-8"
     )
 
 
-def render_plan(runs: list[OperationRun], ndjson_path: Path, meta: dict[str, Any]) -> str:
+def render_index(runs: list[tuple[dict[str, Any], list[OperationResult], Path]]) -> str:
+    """One page for several suites: (meta, results, report file) of the last run of each."""
+    rows = []
+    everything: list[OperationResult] = []
+    for meta, results, report in sorted(runs, key=lambda run: run[0]["suite"]):
+        results = [result for result in results if result.verdict != VERDICT_DESELECTED]
+        everything += results
+        verdicts = Counter(result.verdict for result in results)
+        rows.append(
+            [
+                f"[{meta['suite']}]({report})",
+                meta["time"],
+                len(results),
+                *(verdicts[verdict] or "" for verdict in _VERDICT_ORDER),
+            ]
+        )
+    contract, coverage = _headline(everything)
+    return "\n".join(
+        [
+            "# API contract report: all suites",
+            "",
+            "The last run of each suite. A suite has its own report with the details.",
+            "",
+            _bold_label(contract),
+            "",
+            _bold_label(coverage),
+            "",
+            *_table(
+                ["Suite", "Run", "Operations", *(_VERDICT_TEXT[v][0] for v in _VERDICT_ORDER)],
+                rows,
+            ),
+            "## Verdicts",
+            "",
+            *_table(
+                ["Verdict", "Meaning"],
+                [
+                    [_VERDICT_TEXT[verdict][0], _VERDICT_TEXT[verdict][1]]
+                    for verdict in _VERDICT_ORDER
+                ],
+            ),
+        ]
+    )
+
+
+def render_plan(
+    runs: list[OperationRun],
+    ndjson_path: Path,
+    meta: dict[str, Any],
+    fixtures: list[FixtureRow] | None = None,
+) -> str:
     by_label: dict[str, Counter[tuple[str, str]]] = {}
     for case in read_cases(ndjson_path):
         mode = "invalid" if case.is_negative else "valid"
@@ -344,12 +439,13 @@ def render_plan(runs: list[OperationRun], ndjson_path: Path, meta: dict[str, Any
         "## Operations",
         "",
         *_table(
-            ["Operation", "operationId", "SDK", "Sent", "Cases", "Valid", "Invalid"],
+            ["Operation", "operationId", "SDK", "Login", "Sent", "Cases", "Valid", "Invalid"],
             [
                 [
                     _name(run),
                     run.operation_id,
                     "yes" if run.sdk else "",
+                    run.auth,
                     _STATE_TEXT[run.state],
                     _count(run),
                     _count(run, "valid"),
@@ -364,6 +460,7 @@ def render_plan(runs: list[OperationRun], ndjson_path: Path, meta: dict[str, Any
             ["Operation", "operationId", "Reason"],
             [[_name(run), run.operation_id, run.reason] for run in not_sent],
         ),
+        *_fixture_section(fixtures or [], with_values=False),
         "## Test cases for each operation",
         "",
     ]
@@ -381,8 +478,12 @@ def render_plan(runs: list[OperationRun], ndjson_path: Path, meta: dict[str, Any
 
 
 def write_plan(
-    runs: list[OperationRun], ndjson_path: Path, meta: dict[str, Any], directory: Path
+    runs: list[OperationRun],
+    ndjson_path: Path,
+    meta: dict[str, Any],
+    fixtures: list[FixtureRow],
+    directory: Path,
 ) -> Path:
     path = directory / "plan.md"
-    path.write_text(render_plan(runs, ndjson_path, meta), encoding="utf-8")
+    path.write_text(render_plan(runs, ndjson_path, meta, fixtures), encoding="utf-8")
     return path

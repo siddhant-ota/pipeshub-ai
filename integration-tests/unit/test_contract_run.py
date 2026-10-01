@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from contract_samples import SPEC, case_event, write_events, write_suite
 
 from helper.contract import runner
@@ -23,12 +24,14 @@ from helper.contract.config import (
     STATE_SKIPPED,
     STATE_VALUE_MISSING,
     build_config,
+    build_logins,
     build_substitutions,
+    build_tokens,
     plan_run,
 )
-from helper.contract.created import created_resource_paths
+from helper.contract.created import Leftover, created_resources
 from helper.contract.events import read_cases
-from helper.contract.suite import Suite, load_suite
+from helper.contract.suite import AUTH_NONE, AUTH_SESSION, Suite, load_suite
 from helper.contract.values import ContractValues
 
 pytestmark = pytest.mark.unit
@@ -54,7 +57,7 @@ def suite(tmp_path: Path) -> Suite:
     return load_suite(
         write_suite(
             tmp_path,
-            negative_only={"reason": "Costs money.", "operations": ["createThing"]},
+            negative_only=[{"reason": "Costs money.", "operations": ["createThing"]}],
             created_resources=[
                 {
                     "operation": "createThing",
@@ -112,14 +115,15 @@ def test_selection_and_skip(tmp_path: Path) -> None:
     }
 
 
-def test_config_carries_path_values_and_switches_operations_off(suite: Suite) -> None:
+def test_config_switches_operations_off_and_limits_what_is_generated(suite: Suite) -> None:
     values = ContractValues(values={"thing.id": "T1", "kb.id": "K1", "llm.key": "M1"})
     runs = plan_run(suite, values)
 
-    config = build_config(suite, values, runs)
+    config = build_config(suite, runs)
     blocks = {block["include-operation-id"]: block for block in config["operations"]}
 
-    assert blocks["deleteThing"]["parameters"] == {"path.thingId": "T1"}
+    # An operation that is sent in full needs no block: the hooks give it its values.
+    assert "deleteThing" not in blocks
     assert blocks["listThings"] == {"include-operation-id": "listThings", "enabled": False}
     assert blocks["createThing"]["generation"] == {"mode": "negative"}
     assert blocks["createThing"]["phases"] == {"examples": {"enabled": False}}
@@ -130,7 +134,7 @@ def test_config_carries_path_values_and_switches_operations_off(suite: Suite) ->
 
 def test_config_of_an_examples_only_operation(tmp_path: Path) -> None:
     suite = load_suite(
-        write_suite(tmp_path, examples_only={"reason": "Slow.", "operations": ["listThings"]}),
+        write_suite(tmp_path, examples_only=[{"reason": "Slow.", "operations": ["listThings"]}]),
         SPEC,
     )
     runs = plan_run(suite, ALL_VALUES)
@@ -139,8 +143,7 @@ def test_config_of_an_examples_only_operation(tmp_path: Path) -> None:
     assert by_id["listThings"].state == STATE_EXAMPLES_ONLY
     assert by_id["listThings"].is_sent
     blocks = {
-        block["include-operation-id"]: block
-        for block in build_config(suite, ALL_VALUES, runs)["operations"]
+        block["include-operation-id"]: block for block in build_config(suite, runs)["operations"]
     }
     # Invalid requests from the coverage phase; the examples phase is left on, unlike negative-only.
     assert blocks["listThings"] == {
@@ -191,11 +194,69 @@ def test_a_new_run_discards_the_results_of_the_one_before(tmp_path: Path) -> Non
 
 
 def test_substitutions_cover_the_operations_that_are_sent(suite: Suite) -> None:
-    runs = plan_run(suite, ALL_VALUES, selected={"createThing"})
+    runs = plan_run(suite, ALL_VALUES, selected={"createThing", "deleteThing"})
 
     assert build_substitutions(suite, ALL_VALUES, runs) == {
-        "POST /things": {"body.filters.kb[*]": "K1", "body.models[*].modelKey": "M1"}
+        "POST /things": {"body.filters.kb[*]": "K1", "body.models[*].modelKey": "M1"},
+        "DELETE /things/{thingId}": {"path.thingId": "T1"},
     }
+
+
+def test_rate_limits_of_the_suite_and_of_an_operation(tmp_path: Path) -> None:
+    suite = load_suite(
+        write_suite(tmp_path, rate_limit="100/m", operation_rate_limits={"listThings": "5/m"}),
+        SPEC,
+    )
+
+    config = build_config(suite, plan_run(suite, ALL_VALUES))
+
+    assert config["rate-limit"] == "100/m"
+    assert {"include-operation-id": "listThings", "rate-limit": "5/m"} in config["operations"]
+
+
+def test_each_operation_logs_in_the_way_the_suite_says(tmp_path: Path) -> None:
+    suite = load_suite(
+        write_suite(
+            tmp_path, auth={"listThings": AUTH_SESSION, "deleteThing": {"token": "thing.token"}}
+        ),
+        SPEC,
+    )
+    values = ContractValues(values={**ALL_VALUES.values, "thing.token": "secret-token"})
+    runs = plan_run(suite, values)
+
+    assert build_logins(suite, runs) == {
+        "GET /things": AUTH_SESSION,
+        "POST /things": AUTH_NONE,
+        "DELETE /things/{thingId}": "token",
+    }
+    assert build_tokens(suite, values, runs) == {"DELETE /things/{thingId}": "secret-token"}
+    # The token is a value like any other: without it the operation is not sent.
+    without = {run.operation_id: run for run in plan_run(suite, ALL_VALUES)}
+    assert without["deleteThing"].state == STATE_VALUE_MISSING
+    assert "thing.token" in without["deleteThing"].reason
+
+
+def test_an_operation_whose_login_is_not_available_is_not_sent(tmp_path: Path) -> None:
+    suite = load_suite(write_suite(tmp_path, auth={"listThings": AUTH_SESSION}), SPEC)
+    values = ContractValues(
+        values=dict(ALL_VALUES.values), no_login={AUTH_SESSION: "no test user is configured"}
+    )
+
+    runs = {run.operation_id: run for run in plan_run(suite, values)}
+
+    assert runs["listThings"].state == STATE_VALUE_MISSING
+    assert runs["listThings"].reason == "No `session` login: no test user is configured"
+    assert runs["deleteThing"].state == STATE_FULL
+
+
+def test_a_credential_is_not_written_to_the_files_of_a_run(suite: Suite, tmp_path: Path) -> None:
+    values = ContractValues(values=dict(ALL_VALUES.values), secret={"kb.id"})
+
+    _, _, env = runner._prepare(suite, values, runner.RunFiles(tmp_path), None)
+
+    assert '"K1"' not in runner.RunFiles(tmp_path).substitutions.read_text(encoding="utf-8")
+    assert "(secret)" in runner.RunFiles(tmp_path).substitutions.read_text(encoding="utf-8")
+    assert '"K1"' in env["CONTRACT_SUBSTITUTIONS"], "the hooks still get the real value"
 
 
 def test_created_resources_are_found_in_the_2xx_responses(suite: Suite, tmp_path: Path) -> None:
@@ -215,8 +276,35 @@ def test_created_resources_are_found_in_the_2xx_responses(suite: Suite, tmp_path
         ],
     )
 
-    assert created_resource_paths(suite, ALL_VALUES, events) == ["/things/new-1?p=P1"]
-    assert created_resource_paths(suite, ALL_VALUES, tmp_path / "no-run.ndjson") == []
+    # It is deleted with the login of the operation that created it.
+    assert created_resources(suite, ALL_VALUES, events) == [
+        Leftover("/things/new-1?p=P1", AUTH_NONE)
+    ]
+    assert created_resources(suite, ALL_VALUES, tmp_path / "no-run.ndjson") == []
+
+
+def test_a_created_resource_can_be_an_item_of_a_list(tmp_path: Path) -> None:
+    suite = load_suite(
+        write_suite(
+            tmp_path,
+            created_resources=[
+                {
+                    "operation": "createThing",
+                    "id_pointer": "/things/0/_id",
+                    "delete_path": "/things/{id}",
+                }
+            ],
+        ),
+        SPEC,
+    )
+    events = write_events(
+        tmp_path,
+        [case_event("POST /things", case_id="a", status=201, response={"things": [{"_id": "n"}]})],
+    )
+
+    assert [leftover.path for leftover in created_resources(suite, ALL_VALUES, events)] == [
+        "/things/n"
+    ]
 
 
 @pytest.fixture(scope="module")
@@ -305,3 +393,57 @@ def test_real_values_reach_the_request(planned_cases: dict[str, list]) -> None:
     assert any(
         f"projectId={placeholder}" in case.target for case in with_project if case.is_negative
     )
+
+
+def _path_cases(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **suite_keys: object) -> list:
+    """The cases of one real operation whose path parameter is an enum, against the stub."""
+    monkeypatch.setattr(runner, "REPORTS_DIR", tmp_path / "reports")
+    suite_path = tmp_path / "suite.yaml"
+    suite_path.write_text(
+        yaml.safe_dump(
+            {
+                "name": "path-values",
+                "include_path_regex": "^/configurationManager/ai-models/available/",
+                **suite_keys,
+            }
+        ),
+        encoding="utf-8",
+    )
+    plan_path = runner.plan(load_suite(suite_path))
+    return list(read_cases(plan_path.parent / "events.ndjson"))
+
+
+def _last_segment(target: str) -> str:
+    return target.split("?")[0].rsplit("/", 1)[1]
+
+
+def test_a_path_parameter_with_listed_values_needs_no_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The spec lists the values of `modelType`, and Schemathesis sends each of them."""
+    cases = _path_cases(tmp_path, monkeypatch)
+
+    valid = {_last_segment(case.target) for case in cases if not case.is_negative}
+    assert {"llm", "embedding"} <= valid
+    assert any(case.is_negative for case in cases)
+
+
+def test_a_path_value_leaves_the_invalid_path_of_a_negative_case_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cases = _path_cases(
+        tmp_path,
+        monkeypatch,
+        path_parameters={"defaults": [{"path_prefix": "/", "values": {"modelType": "model.type"}}]},
+        # A value the spec allows. One it forbids would turn every case into an invalid one:
+        # Schemathesis looks at the request again after the value is in.
+        constants={"model.type": "llm"},
+    )
+
+    valid = {_last_segment(case.target) for case in cases if not case.is_negative}
+    about_the_path = {
+        _last_segment(case.target) for case in cases if case.is_negative and case.location == "path"
+    }
+
+    assert valid == {"llm"}
+    assert about_the_path and "llm" not in about_the_path

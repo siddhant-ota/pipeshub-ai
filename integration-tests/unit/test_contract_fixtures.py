@@ -6,54 +6,60 @@ only when the suite runs against a deployment. These find it without one.
 
 from __future__ import annotations
 
-import importlib.util
-import sys
 from collections import Counter
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 
 from helper.contract.baseline import load_baseline
+from helper.contract.pytest_support import TEST_MODULE_NAME
+from helper.contract.runner import BASELINE_NAME, SUITES_ROOT, suite_paths
+from helper.contract.sources import fixture_rows, load_value_sources
 from helper.contract.suite import load_suite
 
 pytestmark = pytest.mark.unit
 
-CONTRACT_DIRS = sorted(
-    path.parent
-    for path in (Path(__file__).resolve().parents[1] / "response-validation").glob(
-        "**/contract/suite.yaml"
+SUITES = suite_paths()
+
+
+def _suite_id(suite_path: Path) -> str:
+    return str(suite_path.parent.relative_to(SUITES_ROOT))
+
+
+@pytest.mark.parametrize("suite_path", SUITES, ids=_suite_id)
+def test_fixtures_provide_every_value_the_suite_names(suite_path: Path) -> None:
+    suite = load_suite(suite_path)
+    provided = Counter(key for source in load_value_sources(suite_path) for key in source.keys)
+
+    assert not suite.fixture_keys - set(provided), (
+        "suite.yaml names values that no fixture provides"
     )
-)
-
-
-def _conftest(directory: Path) -> ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        f"contract_conftest_{directory.parent.name}", directory / "conftest.py"
-    )
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    # `@dataclass` looks its module up in sys.modules while the module is still loading.
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-@pytest.mark.parametrize("directory", CONTRACT_DIRS, ids=lambda path: path.parent.name)
-def test_fixtures_provide_every_value_the_suite_names(directory: Path) -> None:
-    provided = Counter(key for source in _conftest(directory).VALUE_SOURCES for key in source.keys)
-    needed = load_suite(directory / "suite.yaml").value_keys
-
-    assert not needed - set(provided), "suite.yaml names values that no fixture provides"
     assert not [key for key, count in provided.items() if count > 1], "two fixtures provide one key"
+    assert not set(provided) & set(suite.constants), "a fixture and a constant provide one key"
 
 
-@pytest.mark.parametrize("directory", CONTRACT_DIRS, ids=lambda path: path.parent.name)
-def test_the_baseline_names_only_operations_of_its_suite(directory: Path) -> None:
+@pytest.mark.parametrize("suite_path", SUITES, ids=_suite_id)
+def test_the_report_can_say_what_every_fixture_is(suite_path: Path) -> None:
+    rows = fixture_rows(load_suite(suite_path), load_value_sources(suite_path))
+
+    assert not [row.fixture for row in rows if len(row.what) < 10], (
+        "a fixture without a description"
+    )
+    assert not [row.fixture for row in rows if not row.operations], "a fixture no operation uses"
+
+
+@pytest.mark.parametrize("suite_path", SUITES, ids=_suite_id)
+def test_the_baseline_names_only_operations_of_its_suite(suite_path: Path) -> None:
     """An operation that was renamed or removed must not leave its entries behind."""
-    suite = load_suite(directory / "suite.yaml")
+    suite = load_suite(suite_path)
 
     load_baseline(
-        directory / "baseline.json",
+        suite_path.with_name(BASELINE_NAME),
         {planned.operation.operation_id for planned in suite.operations},
     )
+
+
+@pytest.mark.parametrize("suite_path", SUITES, ids=_suite_id)
+def test_every_suite_has_its_test_module(suite_path: Path) -> None:
+    assert suite_path.with_name(TEST_MODULE_NAME).exists()
+    assert suite_path.with_name(BASELINE_NAME).exists()

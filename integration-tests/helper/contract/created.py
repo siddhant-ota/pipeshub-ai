@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -10,23 +11,34 @@ from helper.contract.suite import Suite
 from helper.contract.values import ContractValues
 
 
+@dataclass(frozen=True)
+class Leftover:
+    """One resource to delete: the API path, and how to log in for it."""
+
+    path: str
+    auth: str
+
+
 def _at_pointer(document: Any, pointer: str) -> Any:
     for part in pointer.strip("/").split("/"):
-        if not isinstance(document, dict):
+        if isinstance(document, list) and part.isdigit() and int(part) < len(document):
+            document = document[int(part)]
+        elif isinstance(document, dict):
+            document = document.get(part)
+        else:
             return None
-        document = document.get(part)
     return document
 
 
-def created_resource_paths(suite: Suite, values: ContractValues, events_path: Path) -> list[str]:
-    """API paths to DELETE, one for each resource a 2xx response reported as created.
+def created_resources(suite: Suite, values: ContractValues, events_path: Path) -> list[Leftover]:
+    """What to DELETE, one entry for each resource a 2xx response reported as created.
 
     A path that still contains `{...}` names a value that the run did not have.
     """
     if not events_path.exists():
         return []
     rules = {rule.operation.label: rule for rule in suite.created_resources}
-    paths: list[str] = []
+    leftovers: list[Leftover] = []
     for case in read_cases(events_path):
         rule = rules.get(case.label)
         if rule is None or case.status is None or not 200 <= case.status < 300:
@@ -37,5 +49,5 @@ def created_resource_paths(suite: Suite, values: ContractValues, events_path: Pa
         path = rule.delete_path.replace("{id}", resource_id)
         for key, value in values.values.items():
             path = path.replace(f"{{{key}}}", value)
-        paths.append(path)
-    return paths
+        leftovers.append(Leftover(path, rule.auth))
+    return leftovers
