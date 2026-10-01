@@ -153,6 +153,7 @@ spec and fails, before any request is sent, when they do not agree.
 | `no_success_response` | Operations for which no request can get a 2xx, each with a reason |
 | `created_resources` | What a successful test case creates, so the test can delete it |
 | `skip` | Operations that are not sent, each with a reason |
+| `last` | Operations that are sent after all others of the suite, because they remove what the others need ("delete all ...") |
 | `requires` | Value keys an operation needs that go into no request, for example a fixture that saves a setting and puts it back |
 | `auth` | How an operation logs in, where the spec does not decide it (see below) |
 | `rate_limit`, `operation_rate_limits` | A lower request rate for the suite or for one operation, for example `30/m` |
@@ -193,7 +194,9 @@ a reason in the suite file, and shows in the report as a coverage gap.
 | `negative_only` | A valid request calls an LLM, sends an email, calls a third party, starts a long job, or needs a real file. Its invalid requests must be rejected before any of that. |
 | `skip` | One accepted request, valid or not, can break the deployment or the run, or cannot be undone: it deletes or reconfigures what other suites need, or it ends the login that the run uses. |
 
-Before an operation is limited or skipped, look for a fixture that makes it safe.
+Before an operation is limited or skipped, look for a fixture that makes it safe,
+and for `last`: Schemathesis sends the operations in the order of the spec, and
+an operation that removes the data of the others can run after them.
 `DELETE /users/{id}` is not skipped; it gets a user that a fixture made for it.
 
 `no_success_response` is for an operation that is sent but that no generated

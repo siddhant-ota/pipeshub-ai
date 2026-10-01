@@ -648,3 +648,34 @@ def test_one_operation_can_create_several_things(tmp_path: Path) -> None:
         Leftover("/things/n1", "token", "thing.token"),
         Leftover("/things/n2", "token", "thing.token"),
     ]
+
+
+def test_an_operation_can_be_sent_after_all_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """For one that removes what the others need. Schemathesis itself keeps the order of the spec."""
+    suite_keys = {
+        "include_path_regex": r"^/conversations/\{conversationId\}/(title|archive|unarchive)$",
+        "path_parameters": {
+            "defaults": [{"path_prefix": "/", "values": {"conversationId": "conversation.id"}}]
+        },
+    }
+
+    def _order(**more: object) -> list[str]:
+        folder = _planned(tmp_path, monkeypatch, **suite_keys, **more)
+        return [case.label for case in read_cases(folder / "events.ndjson")]
+
+    in_spec_order = _order()
+    first = in_spec_order[0]
+    first_id = {
+        "PATCH /conversations/{conversationId}/title": "updateConversationTitle",
+        "PATCH /conversations/{conversationId}/archive": "archiveConversation",
+        "PATCH /conversations/{conversationId}/unarchive": "unarchiveConversation",
+    }[first]
+
+    moved = _order(last=[first_id])
+
+    assert sorted(moved) == sorted(in_spec_order), "the same cases are sent"
+    count = in_spec_order.count(first)
+    assert set(moved[-count:]) == {first}
+    assert first not in moved[:-count]

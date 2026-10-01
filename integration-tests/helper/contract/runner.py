@@ -28,6 +28,8 @@ from helper.contract.config import (
     build_logins,
     build_substitutions,
     build_tokens,
+    only,
+    passes,
     plan_run,
     write_config,
     write_json,
@@ -58,6 +60,8 @@ _COMPLETED_EXIT_CODES = (0, 1)
 # `stop_reason` of a run in which every selected operation went through every phase.
 _RAN_TO_THE_END = "completed"
 _PLACEHOLDER = "0" * 24
+# The folder, inside that of a run, for the Schemathesis run of the `last` operations.
+_LAST_PASS = "last"
 # For a value that goes where the spec gives a format; the plain placeholder there would make
 # every valid case of the operation an invalid one in the plan.
 _PLACEHOLDER_BY_FORMAT = {
@@ -216,6 +220,42 @@ def _discard_previous_run(files: RunFiles) -> None:
         stale.unlink(missing_ok=True)
 
 
+def _run_in_passes(
+    suite: Suite,
+    files: RunFiles,
+    runs: list[OperationRun],
+    config: dict[str, Any],
+    *,
+    api_url: str,
+    env: dict[str, str],
+) -> None:
+    """Run Schemathesis once for the operations of the suite, and once more for its `last` ones.
+
+    The second run writes into a folder of its own; its cases are then added to the files
+    of the first, so that everything after this reads one run.
+    """
+    groups = passes(suite, runs)
+    for index, operation_ids in enumerate(groups):
+        pass_files = files if index == 0 else RunFiles(files.directory / _LAST_PASS)
+        if index:
+            pass_files.directory.mkdir(parents=True, exist_ok=True)
+            _discard_previous_run(pass_files)
+        if len(groups) > 1:
+            write_config(only(config, suite, operation_ids), pass_files.config)
+        _run_schemathesis(suite, pass_files, api_url=api_url, env=env)
+        if index:
+            _append_run(pass_files, files)
+
+
+def _append_run(source: RunFiles, target: RunFiles) -> None:
+    with open(target.events, "a", encoding="utf-8") as events:
+        events.write(source.events.read_text(encoding="utf-8"))
+    har = json.loads(target.har.read_text(encoding="utf-8"))
+    more = json.loads(source.har.read_text(encoding="utf-8"))
+    har["log"]["entries"] += more["log"]["entries"]
+    target.har.write_text(json.dumps(har), encoding="utf-8")
+
+
 def _prepare(
     suite: Suite, values: ContractValues, files: RunFiles, selected: set[str] | None
 ) -> tuple[list[OperationRun], dict[str, Any], dict[str, str]]:
@@ -276,7 +316,9 @@ def execute(
     )
     if any(run.is_sent for run in runs):
         try:
-            _run_schemathesis(suite, files, api_url=api_url, env={**env, BASE_URL_ENV: base_url})
+            _run_in_passes(
+                suite, files, runs, config, api_url=api_url, env={**env, BASE_URL_ENV: base_url}
+            )
         finally:
             secrets = {str(values.values[key]) for key in values.secret if key in values.values}
             redact_run_files((files.events, files.har), secrets)
@@ -325,9 +367,11 @@ def plan(
     config["checks"] = {"enabled": False}
     write_config(config, files.config)
     with stub_server() as url:
-        _run_schemathesis(
+        _run_in_passes(
             suite,
             files,
+            runs,
+            config,
             api_url=f"{url}{suite.api_prefix}",
             env={**env, BASE_URL_ENV: url, STATIC_AUTHORIZATION_ENV: "Bearer plan"},
         )

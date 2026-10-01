@@ -77,6 +77,8 @@ class PlannedOperation:
     # that the API needs and the spec does not describe (`Accept` for a stream), or one whose
     # value only a fixture has (a sign-in session).
     header_values: dict[str, str] = field(default_factory=dict)
+    # Sent after all other operations of the suite; see `last` in the suite file.
+    last: bool = False
     # Value keys that must exist for the operation to be sent, and that go into no request:
     # a fixture that saves a setting and puts it back, or one that prepares the deployment.
     required_keys: tuple[str, ...] = ()
@@ -217,6 +219,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
     rate_limits: dict[str, str] = raw.get("operation_rate_limits") or {}
     requires: dict[str, list[str]] = raw.get("requires") or {}
     headers: dict[str, dict[str, str]] = raw.get("headers") or {}
+    last: list[str] = raw.get("last") or []
 
     referenced = {
         *profiles,
@@ -226,12 +229,17 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
         *rate_limits,
         *requires,
         *headers,
+        *last,
         *((raw.get("path_parameters") or {}).get("operations") or {}),
         *(entry["operation"] for entry in raw.get("created_resources") or []),
     }
     unknown = sorted(referenced - set(by_id))
     if unknown:
         problems.append(f"operations that are not in scope of the spec: {', '.join(unknown)}")
+    if not in_scope:
+        problems.append(
+            f"`include_path_regex` matches no path of the spec: {raw['include_path_regex']}"
+        )
     prefixes = sorted({operation.prefix for operation in in_scope})
     if len(prefixes) > 1:
         problems.append(
@@ -321,6 +329,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
                 rate_limit=str(rate_limits.get(operation_id) or ""),
                 required_keys=tuple(requires.get(operation_id) or ()),
                 header_values=dict(headers.get(operation_id) or {}),
+                last=operation_id in last,
             )
         )
 

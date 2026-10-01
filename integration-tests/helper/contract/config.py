@@ -157,6 +157,27 @@ def build_config(suite: Suite, runs: list[OperationRun]) -> dict[str, Any]:
     return config
 
 
+def passes(suite: Suite, runs: list[OperationRun]) -> list[set[str]]:
+    """The operations to send, in the groups to send them in: first the others, then the `last`.
+
+    Schemathesis sends operations in the order of the spec. An operation that removes what
+    others need ("delete all ...") must come after them, so it gets a pass of its own.
+    """
+    last = {planned.operation.operation_id for planned in suite.operations if planned.last}
+    sent = {run.operation_id for run in runs if run.is_sent}
+    return [group for group in (sent - last, sent & last) if group]
+
+
+def only(config: dict[str, Any], suite: Suite, operation_ids: set[str]) -> dict[str, Any]:
+    """`config` with every operation switched off that is not in `operation_ids`."""
+    blocks = {block["include-operation-id"]: block for block in config["operations"]}
+    for planned in suite.operations:
+        operation_id = planned.operation.operation_id
+        if operation_id not in operation_ids:
+            blocks[operation_id] = {"include-operation-id": operation_id, "enabled": False}
+    return {**config, "operations": list(blocks.values())}
+
+
 def _sent(suite: Suite, runs: list[OperationRun]) -> list[PlannedOperation]:
     sent = {run.operation_id for run in runs if run.is_sent}
     return [planned for planned in suite.operations if planned.operation.operation_id in sent]

@@ -203,6 +203,16 @@ def test_an_examples_only_operation(tmp_path: Path) -> None:
             "path parameters get their value under `path_parameters`: path.thingId",
         ),
         (
+            {
+                "include_path_regex": "^/nothing",
+                "path_parameters": {},
+                "values": {},
+                "client_chosen_ids": [],
+                "ids_without_fixture": [],
+            },
+            "`include_path_regex` matches no path of the spec: ^/nothing",
+        ),
+        (
             {"values_by_operation": {"listThings": {"body.name": "thing.name"}}},
             "`values_by_operation` names field(s) it does not have: body.name",
         ),
