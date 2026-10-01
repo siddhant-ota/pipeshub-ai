@@ -1,0 +1,126 @@
+# Contract-test suite: sign-in, sessions and passwords, the sign-in policy of the
+# organization, and SAML sign-in.
+# Routes: backend/nodejs/apps/src/modules/auth/routes/userAccount.routes.ts,
+#         orgAuthConfig.routes.ts and saml.routes.ts
+# The keys on the right-hand side (`user.mutable.accessToken`, ...) are produced
+# by `contract_values` in conftest.py.
+#
+# Nothing here may end what the run itself logs in with: the session and the
+# password of the test user. So the operations that sign in, end a session or
+# change a password act on users that a fixture owns. The sign-in policy of the
+# organization is changed, but only to one that allows a password, and a
+# fixture puts it back when this suite is done.
+
+name: auth
+
+include_path_regex: "^/(userAccount|orgAuthConfig|saml)(/|$)"
+
+values_by_operation:
+  authenticate:
+    # The organization allows a method only at the step of its sign-in policy,
+    # and a password is the one thing a fixture user can prove.
+    body.method: signIn.method
+    body.credentials.password: user.readonly.password
+  # Every accepted request must leave password sign-in possible, also if the
+  # policy is never put back: the test user has no other way to sign in. With
+  # this value an accepted policy is always one step that allows `password`.
+  # What it hides: no valid request sends another method type (`otp`,
+  # `google`, `microsoft`, `azureAd`, `samlSso`, `oauth`).
+  updateAuthMethod:
+    body.authMethod[*].allowedMethods[*].type: signIn.method
+  resetPassword:
+    body.currentPassword: user.mutable.password
+    # Gap in the spec that this value hides: `newPassword` has no `minLength`
+    # and no pattern, so Schemathesis sends "". The API wants 8 characters with
+    # an upper-case and a lower-case letter, a digit and one of `#?!@$%^&*-`.
+    body.newPassword: user.mutable.newPassword
+  # Both send an email, but only to an address that has an account. The answer
+  # is the same either way.
+  generateLoginOtp:
+    body.email: email.withoutAccount
+  forgotPassword:
+    body.email: email.withoutAccount
+
+# Values that the suite file gives itself.
+constants:
+  signIn.method: password
+  # `invalid` is a reserved top-level domain: nobody signs up with such an
+  # address, and no mail to it can be delivered.
+  email.withoutAccount: contract-no-account@pipeshub.invalid
+
+headers:
+  # The sign-in session that `initAuth` started for the fixture user. A refused
+  # request leaves it as it is. The first accepted one ends it, and the requests
+  # after that are answered 401.
+  authenticate:
+    x-session-token: user.readonly.signInSession
+
+# Fields that must name something that exists, and for which no fixture gives a
+# value. They keep the generated value.
+ids_without_fixture:
+  - field: body.credentials
+    reason: An ID token that Google signs for a real Google account. No fixture can get one.
+  - field: body.credentials.idToken
+    reason: An ID token that Microsoft or an OAuth provider signs. No fixture can get one.
+  - field: body.credentials.accessToken
+    reason: An access token of an external identity provider. No fixture can get one.
+  - field: body.credentials.otp
+    reason: A one-time code that is only sent by email.
+
+# Value keys an operation needs that go into no request.
+requires:
+  # Saves the sign-in policy and puts it back when this suite is done.
+  updateAuthMethod:
+    - signInPolicy.saved
+  # The route redirects only when a SAML identity provider is configured.
+  signInViaSAML:
+    - saml.configuration
+
+auth:
+  # A logout makes every earlier session token of its user invalid
+  # (auth.middleware.ts), and the password change is that of the caller. The
+  # spec asks for a session; it must not be the one of the test user.
+  logout:
+    token: user.mutable.accessToken
+  resetPassword:
+    token: user.mutable.accessToken
+  # The spec gives these a special-purpose token (`scopedToken`).
+  refreshToken:
+    token: user.readonly.refreshToken
+  # No API gives out the token these take: see `no_success_response`. They are
+  # sent without one, and are turned away before they do anything.
+  resetPasswordWithToken: none
+  validateEmailChangeToken: none
+  updateSamlAppConfig: none
+
+# The sign-in routes share one limiter (createAuthRateLimiter): 10 requests per
+# minute and client IP by default (MAX_AUTH_REQUESTS_PER_MINUTE), counted for
+# all five routes together, and for every sign-in of the run and its fixtures
+# too. The operations run one after the other, each with a limit of its own, so
+# two neighbours can overlap for a minute: every pair here adds up to 8.
+operation_rate_limits:
+  initAuth: 3/m
+  authenticate: 5/m
+  generateLoginOtp: 3/m
+  forgotPassword: 5/m
+  resetPassword: 3/m
+
+no_success_response:
+  - operation: resetPasswordWithToken
+    reason: >-
+      Needs the password-reset token that is only sent by email. Without it
+      every request is answered 401.
+  - operation: validateEmailChangeToken
+    reason: >-
+      Needs the email-change token that is only sent by email. Without it every
+      request is answered 401.
+  - operation: updateSamlAppConfig
+    reason: >-
+      Needs a `fetch:config` token that only the backend services sign for each
+      other. Without it every request is answered 401.
+  - operation: exchangeOAuthCode
+    reason: Needs a one-time authorization code from an external identity provider.
+
+# `setUpAuthConfig` needs no entry: it answers 200 and does nothing once a
+# sign-in policy exists, and creating the organization always creates one
+# (org.controller.ts).
