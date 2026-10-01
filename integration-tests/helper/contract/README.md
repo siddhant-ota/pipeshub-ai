@@ -82,7 +82,8 @@ details; `index.md` one level up adds the suites of a session together.
 | failed | Stale suite entry | The suite file says no request can succeed, and one did; remove the entry |
 | failed | Unverified | No difference, but the responses that would show one never came (see below) |
 | failed | Incomplete | A request got no response, or Schemathesis could not finish the operation |
-| failed | Not run | A value the operation needs is missing, for example a fixture failed |
+| failed | Not run | A value the operation needs is missing: a fixture failed |
+| skipped | Not possible here | A fixture skipped: this deployment cannot give the operation what it needs (no SMTP settings, no signing secret, ...) |
 | skipped | Skipped | The suite file skips the operation, with a reason |
 
 "Unverified" means the operation was not really exercised: no request got a
@@ -201,6 +202,31 @@ an operation that removes the data of the others can run after them.
 
 `no_success_response` is for an operation that is sent but that no generated
 request can satisfy, for example one that needs a one-time code from an email.
+It is also the entry for an operation that cannot succeed because the spec and
+the API differ in a way that a run cannot report: the gateway does not serve the
+route and the spec lists the 404, or the body that the API needs has a field
+that the spec does not have. Without the entry the test would fail as
+"Unverified" in every run, and no baseline can accept that verdict. The reason
+of the entry says what differs.
+
+#### An unknown property is no way around a limit
+
+PipesHub does not reject a property that the spec does not know. It drops the
+property and handles the request. So the generated case "object with unexpected
+properties" is, to the API, a valid request. For an operation that is limited
+(`negative_only`, `examples_only`) that case would do exactly what the limit is
+there to prevent: call the LLM, send the email. The library sends that one case
+of a limited operation **without a login**, so the API turns it away. For every
+other operation the case is sent as it is, and the run reports that the API
+accepted it.
+
+#### A fixture that skips
+
+A fixture calls `pytest.skip("why")` when the deployment cannot give what it
+needs: no SMTP settings, no signing secret in the environment, a speech provider
+that costs money. The operations that need its values are then skipped with that
+reason ("Not possible here"), and the report lists them as a gap. A fixture that
+fails for any other reason makes its operations fail ("Not run").
 
 ### Why IDs need real values
 
@@ -242,6 +268,10 @@ Three special values:
   request: `contract-team-ab12-{case}`. Use it for a name that must be unique, so
   that every valid create request can succeed, not only the first one.
 - **A field under a free-form key** is written `body.roles{*}.modelKey`.
+- **A pool.** A fixture can give a list of values for one key. Each request of an
+  operation takes the next one. Use it for an operation that uses its object up:
+  after "add the user to the group" has succeeded once, the same request changes
+  nothing and the API answers 400, so the next request needs another group.
 
 A value for a field that is not an ID has a price. The field is no longer sent
 with what Schemathesis generates for it, so the run cannot show that the spec
@@ -278,11 +308,15 @@ integration-test fixture. The report and the plan have a "Fixtures" section made
 from that list, with the value each key had in the run, or why it had none.
 A value marked `secret` (a token) is not shown, and no file of the run has it.
 
-The API answers with the secrets of the OAuth apps and access tokens that the
-test cases create. `redaction.py` masks the text under every field whose name
-ends in `secret`, `token`, `password`, `apiKey` and the like, in `events.ndjson`
-and `requests.har`, before anything reads them. The run deletes those apps and
-tokens at the end.
+A run logs in as an admin, and the API answers with the secrets of the OAuth
+apps and access tokens that the test cases create. Schemathesis masks only the
+`Authorization` header of its HAR file. `redaction.py` masks, in `events.ndjson`,
+`requests.har` and `schemathesis.log`, before anything reads them: the headers
+of every case, the text under every field whose name ends in `secret`, `token`,
+`password`, `apiKey` and the like, every JWT and PipesHub access token wherever
+it stands, and the values that a fixture marked `secret`. The run also deletes
+those apps and tokens at the end. Treat the report folder as sensitive all the
+same: a credential under a field name that the rule does not know stays.
 
 ## How a run works
 

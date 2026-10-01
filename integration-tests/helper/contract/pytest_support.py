@@ -71,7 +71,11 @@ CONTRACT_MARKS = [
 ]
 
 # Whatever makes a fixture fail, the effect here is the same: its values are missing.
-_FIXTURE_FAILURES = (Exception, pytest.fail.Exception, pytest.skip.Exception)
+_FIXTURE_FAILURES = (Exception, pytest.fail.Exception)
+# A fixture that skips says: this deployment cannot give me what I need (no SMTP settings, no
+# signing secret, a provider that costs money is configured). The operations that need its
+# values are then skipped with that reason. They do not fail: nothing is wrong.
+_FIXTURE_SKIPS = pytest.skip.Exception
 
 
 def response_body(resp: requests.Response, expected: tuple[int, ...], what: str) -> dict[str, Any]:
@@ -97,10 +101,15 @@ def _quietly(
     return done
 
 
-def delete_quietly(what: str, delete: Callable[[], requests.Response]) -> None:
-    """Delete one thing in a fixture teardown."""
-    # 404: the operation under test already removed it.
-    _quietly("delete", what, delete, also_fine=(404,))
+def delete_quietly(
+    what: str, delete: Callable[[], requests.Response], also_fine: tuple[int, ...] = (404,)
+) -> None:
+    """Delete one thing in a fixture teardown.
+
+    `also_fine`: the statuses that mean it is gone or going. 404 by default: the operation
+    under test already removed it.
+    """
+    _quietly("delete", what, delete, also_fine=also_fine)
 
 
 def restore_quietly(what: str, restore: Callable[[], requests.Response]) -> bool:
@@ -127,6 +136,10 @@ def _failure(fixture: str, exc: BaseException) -> str:
     return f"fixture `{fixture}` failed: {type(exc).__name__}: {str(exc)[:300]}"
 
 
+def _skip(fixture: str, exc: BaseException) -> str:
+    return f"{str(exc)[:300]} (fixture `{fixture}`)"
+
+
 def collect_values(
     request: pytest.FixtureRequest, suite: Suite, sources: tuple[ValueSource, ...]
 ) -> ContractValues:
@@ -139,6 +152,8 @@ def collect_values(
     for source in sources:
         try:
             values = source.read(request.getfixturevalue(source.fixture))
+        except _FIXTURE_SKIPS as exc:
+            collected.unavailable.update(dict.fromkeys(source.keys, _skip(source.fixture, exc)))
         except _FIXTURE_FAILURES as exc:  # noqa: BLE001
             reason = _failure(source.fixture, exc)
             logger.warning("Contract values: %s", reason)
@@ -151,6 +166,8 @@ def collect_values(
         fixture = _CLIENT_FIXTURES[AUTH_SESSION]
         try:
             request.getfixturevalue(fixture)
+        except _FIXTURE_SKIPS as exc:
+            collected.unavailable_login[AUTH_SESSION] = _skip(fixture, exc)
         except _FIXTURE_FAILURES as exc:  # noqa: BLE001
             collected.no_login[AUTH_SESSION] = _failure(fixture, exc)
     return collected

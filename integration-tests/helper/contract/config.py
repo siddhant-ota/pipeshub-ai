@@ -19,7 +19,7 @@ from helper.contract.suite import (
     PlannedOperation,
     Suite,
 )
-from helper.contract.values import PATH, ContractValues, Value, parse_field
+from helper.contract.values import PATH, ContractValues, ValueOrPool, parse_field
 
 CONTRACT_DIR = Path(__file__).resolve().parent
 BASE_CONFIG_PATH = CONTRACT_DIR / "schemathesis.base.toml"
@@ -29,6 +29,8 @@ HOOKS_PATH = CONTRACT_DIR / "hooks.py"
 SUBSTITUTIONS_ENV = "CONTRACT_SUBSTITUTIONS"
 FILES_ENV = "CONTRACT_FILES"
 HEADERS_ENV = "CONTRACT_HEADERS"
+# The operations whose valid requests are limited; see hooks._is_valid_in_disguise.
+LIMITED_ENV = "CONTRACT_LIMITED"
 LOGINS_ENV = "CONTRACT_LOGINS"
 # The tokens that fixtures provide. In the environment, not in a file: they are credentials.
 TOKENS_ENV = "CONTRACT_TOKENS"
@@ -46,6 +48,8 @@ STATE_NEGATIVE_ONLY = "negative_only"
 STATE_SKIPPED = "skipped"
 # A value or a login that the operation needs is not there.
 STATE_VALUE_MISSING = "value_missing"
+# A fixture skipped: this deployment cannot give the operation what it needs.
+STATE_UNAVAILABLE = "unavailable"
 # Not selected for this run.
 STATE_DESELECTED = "deselected"
 
@@ -89,11 +93,20 @@ def _state_for(
     if planned.auth in values.no_login:
         return STATE_VALUE_MISSING, f"No `{planned.auth}` login: {values.no_login[planned.auth]}"
     missing = sorted(key for key in planned.value_keys if key not in values.values)
-    if missing:
+    failed = [key for key in missing if key not in values.unavailable]
+    if failed:
         reasons = "; ".join(
-            f"{key} ({values.missing.get(key, 'no fixture provides it')})" for key in missing
+            f"{key} ({values.missing.get(key, 'no fixture provides it')})" for key in failed
         )
         return STATE_VALUE_MISSING, f"Missing value: {reasons}"
+    # Only now: an operation with a broken fixture fails, also when another one skipped.
+    if planned.auth in values.unavailable_login:
+        return STATE_UNAVAILABLE, (
+            f"No `{planned.auth}` login here: {values.unavailable_login[planned.auth]}"
+        )
+    if missing:
+        reasons = "; ".join(dict.fromkeys(values.unavailable[key] for key in missing))
+        return STATE_UNAVAILABLE, f"Not possible on this deployment: {reasons}"
     if planned.profile == PROFILE_NEGATIVE_ONLY:
         return STATE_NEGATIVE_ONLY, planned.reason
     if planned.profile == PROFILE_EXAMPLES_ONLY:
@@ -183,11 +196,16 @@ def _sent(suite: Suite, runs: list[OperationRun]) -> list[PlannedOperation]:
     return [planned for planned in suite.operations if planned.operation.operation_id in sent]
 
 
+def build_limited(runs: list[OperationRun]) -> list[str]:
+    """The labels of the operations whose valid requests are limited."""
+    return [run.label for run in runs if run.state in (STATE_NEGATIVE_ONLY, STATE_EXAMPLES_ONLY)]
+
+
 def build_substitutions(
     suite: Suite, values: ContractValues, runs: list[OperationRun]
-) -> dict[str, dict[str, Value]]:
+) -> dict[str, dict[str, ValueOrPool]]:
     """Operation label -> request field -> value, for `hooks.py`."""
-    substitutions: dict[str, dict[str, Value]] = {}
+    substitutions: dict[str, dict[str, ValueOrPool]] = {}
     for planned in _sent(suite, runs):
         fields = {
             **{f"{PATH}.{name}": key for name, key in planned.path_values.items()},

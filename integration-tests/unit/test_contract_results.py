@@ -13,6 +13,7 @@ from helper.contract.config import (
     STATE_DESELECTED,
     STATE_NEGATIVE_ONLY,
     STATE_SKIPPED,
+    STATE_UNAVAILABLE,
     STATE_VALUE_MISSING,
 )
 from helper.contract.report import render_index, render_report, summary_lines
@@ -31,6 +32,7 @@ from helper.contract.results import (
     VERDICT_SKIPPED,
     VERDICT_STALE_BASELINE,
     VERDICT_STALE_SUITE,
+    VERDICT_UNAVAILABLE,
     VERDICT_UNVERIFIED,
     FindingKey,
     OperationResult,
@@ -509,6 +511,7 @@ def test_a_declared_gap_is_partial_not_a_failure(tmp_path: Path) -> None:
     [
         (STATE_VALUE_MISSING, VERDICT_NOT_RUN),
         (STATE_SKIPPED, VERDICT_SKIPPED),
+        (STATE_UNAVAILABLE, VERDICT_UNAVAILABLE),
         (STATE_DESELECTED, VERDICT_DESELECTED),
     ],
 )

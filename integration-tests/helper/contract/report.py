@@ -27,6 +27,7 @@ from helper.contract.results import (
     VERDICT_SKIPPED,
     VERDICT_STALE_BASELINE,
     VERDICT_STALE_SUITE,
+    VERDICT_UNAVAILABLE,
     VERDICT_UNVERIFIED,
     Finding,
     OperationResult,
@@ -69,6 +70,10 @@ _VERDICT_TEXT = {
     VERDICT_PARTIAL: (
         "Partly checked",
         "No difference; by design the success response is not checked",
+    ),
+    VERDICT_UNAVAILABLE: (
+        "Not possible here",
+        "A fixture skipped: this deployment cannot give the operation what it needs",
     ),
     VERDICT_SKIPPED: ("Skipped", "The suite file skips the operation"),
     VERDICT_MATCH: ("Matches", "The spec and the API agree, and a success response was checked"),

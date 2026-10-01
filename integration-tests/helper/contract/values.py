@@ -25,17 +25,25 @@ CASE_NUMBER = "{case}"
 
 # A value from a fixture is text. A constant of the suite file can be a number or a boolean.
 Value = str | int | float | bool
+# A fixture can also give several values for one key: each request of an operation takes
+# the next one. For an operation that uses its object up (add a user to a group: the next
+# request needs a group that the user is not in yet).
+ValueOrPool = Value | list[str]
 
 
 @dataclass
 class ContractValues:
     """The values a run can use, and why any other value is missing."""
 
-    values: dict[str, Value] = field(default_factory=dict)
+    values: dict[str, ValueOrPool] = field(default_factory=dict)
     # value key -> why the fixture that provides it failed
     missing: dict[str, str] = field(default_factory=dict)
+    # value key -> why this deployment cannot give it: its fixture skipped
+    unavailable: dict[str, str] = field(default_factory=dict)
     # way to log in (`session`, ...) -> why this run cannot use it
     no_login: dict[str, str] = field(default_factory=dict)
+    # way to log in -> why this deployment does not have it: its fixture skipped
+    unavailable_login: dict[str, str] = field(default_factory=dict)
     # Value keys whose values are credentials; no file of the run shows them.
     secret: set[str] = field(default_factory=set)
 
@@ -44,20 +52,25 @@ class ContractValues:
 class Substitution:
     location: str
     path: tuple[str, ...]
-    value: Value
+    value: ValueOrPool
 
     @classmethod
-    def for_field(cls, field_name: str, value: Value) -> Substitution:
+    def for_field(cls, field_name: str, value: ValueOrPool) -> Substitution:
         location, path = parse_field(field_name)
         return cls(location, path, value)
 
-    def for_case(self, number: int) -> Substitution:
-        """The substitution for one request: `{case}` in the value becomes its number."""
-        if isinstance(self.value, str) and CASE_NUMBER in self.value:
-            return Substitution(
-                self.location, self.path, self.value.replace(CASE_NUMBER, str(number))
-            )
-        return self
+    def for_case(self, number: int, turn: int = 0) -> Substitution:
+        """The substitution for one request.
+
+        `number` is different in each request of the run and replaces `{case}`.
+        `turn` counts the requests of the operation and picks the value from a pool.
+        """
+        value = self.value
+        if isinstance(value, list):
+            value = value[turn % len(value)]
+        if isinstance(value, str) and CASE_NUMBER in value:
+            value = value.replace(CASE_NUMBER, str(number))
+        return self if value is self.value else Substitution(self.location, self.path, value)
 
 
 @dataclass(frozen=True)
@@ -110,7 +123,7 @@ def is_under_test(substitution: Substitution, mutation: Mutation | None) -> bool
     )
 
 
-def _same_kind(generated: Any, value: Value) -> bool:
+def _same_kind(generated: Any, value: ValueOrPool) -> bool:
     """A value replaces only a generated value of its own type: a wrong type is left as it is."""
     if isinstance(value, bool) or isinstance(generated, bool):
         return isinstance(value, bool) and isinstance(generated, bool)
@@ -119,7 +132,7 @@ def _same_kind(generated: Any, value: Value) -> bool:
     return isinstance(generated, int | float)
 
 
-def _replace(node: Any, path: tuple[str, ...], value: Value) -> tuple[Any, int]:
+def _replace(node: Any, path: tuple[str, ...], value: ValueOrPool) -> tuple[Any, int]:
     if not path:
         return (value, 1) if _same_kind(node, value) else (node, 0)
     head, rest = path[0], path[1:]

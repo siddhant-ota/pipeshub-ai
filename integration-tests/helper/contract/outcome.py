@@ -16,6 +16,7 @@ from helper.contract.results import (
     VERDICT_SKIPPED,
     VERDICT_STALE_BASELINE,
     VERDICT_STALE_SUITE,
+    VERDICT_UNAVAILABLE,
     VERDICT_UNVERIFIED,
     Finding,
     OperationResult,
@@ -54,7 +55,7 @@ def assert_spec_matches_api(result: OperationResult, report: Path) -> None:
     label = result.run.label
     if verdict in (VERDICT_MATCH, VERDICT_PARTIAL):
         return
-    if verdict == VERDICT_SKIPPED:
+    if verdict in (VERDICT_SKIPPED, VERDICT_UNAVAILABLE):
         pytest.skip(result.run.reason)
     if verdict == VERDICT_KNOWN_MISMATCH:
         pytest.xfail(

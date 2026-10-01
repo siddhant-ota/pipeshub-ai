@@ -26,6 +26,7 @@ INTEGRATION_TESTS = Path(__file__).resolve().parents[1]
 MATCHES = "PATCH /conversations/{conversationId}/archive"
 DIFFERS = "GET /search/{searchId}"
 SKIPPED = "DELETE /search"
+NEEDS_MAIL = "GET /search"
 TEST_MODULE = "contract/integration_test_layer_contract.py"
 
 SUITE = r"""
@@ -42,6 +43,9 @@ path_parameters:
   operations:
     deleteSearchById:
       searchId: search.disposable.id
+requires:
+  searchHistory:
+    - mail.ready
 skip:
   - operation: deleteSearchHistory
     reason: Deletes all search history of the user.
@@ -82,7 +86,13 @@ def contract_searches(search_client):
             delete_quietly("search", lambda search_id=search_id: search_client.delete(search_id))
 
 
+@pytest.fixture(scope="module")
+def contract_mail():
+    pytest.skip("The deployment has no mail server.")
+
+
 VALUE_SOURCES = (
+    ValueSource("contract_mail", ("mail.ready",), lambda ready: (ready,), "A mail server."),
     ValueSource(
         "contract_conversation",
         ("conversation.archivable.id",),
@@ -283,6 +293,20 @@ def test_each_operation_gets_the_outcome_of_its_verdict(project: Path) -> None:
         "search search-disposable",
         "conversation conversation-1",
     ]
+
+
+def test_an_operation_is_skipped_when_its_fixture_says_the_deployment_cannot_run_it(
+    project: Path,
+) -> None:
+    """A fixture that skips is not a fixture that broke: nothing is wrong, so nothing fails."""
+    result = _run(project, MATCHES, NEEDS_MAIL)
+    output = result.stdout
+
+    assert "1 passed, 1 skipped" in output, output
+    reason = "Not possible on this deployment: The deployment has no mail server."
+    assert reason in output
+    # The report and the summary still name it as a gap.
+    assert f"Not possible here: {NEEDS_MAIL} — {reason}" in output
 
 
 def test_a_known_difference_is_an_expected_failure(project: Path) -> None:

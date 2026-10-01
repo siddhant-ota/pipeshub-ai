@@ -15,6 +15,7 @@ from helper.contract.config import (
     STATE_DESELECTED,
     STATE_NEGATIVE_ONLY,
     STATE_SKIPPED,
+    STATE_UNAVAILABLE,
     OperationRun,
 )
 from helper.contract.events import Case, read_scenarios
@@ -47,6 +48,8 @@ VERDICT_INCOMPLETE = "incomplete"
 # No request was sent because something the operation needs is missing.
 VERDICT_NOT_RUN = "not_run"
 VERDICT_SKIPPED = "skipped"
+# A fixture skipped: this deployment cannot give the operation what it needs.
+VERDICT_UNAVAILABLE = "unavailable"
 VERDICT_DESELECTED = "deselected"
 
 _UNEXPECTED_PROPERTIES = "object_unexpected_properties"
@@ -178,6 +181,8 @@ class OperationResult:
             return VERDICT_DESELECTED
         if self.run.state == STATE_SKIPPED:
             return VERDICT_SKIPPED
+        if self.run.state == STATE_UNAVAILABLE:
+            return VERDICT_UNAVAILABLE
         if not self.run.is_sent or not self.cases:
             return VERDICT_NOT_RUN
         if self.unfinished:

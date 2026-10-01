@@ -46,3 +46,19 @@ def smtp_configured(config_client: ConfigClient) -> None:
     assert resp.status_code in (200, 201), (
         f"Failed to configure SMTP: {resp.status_code} {resp.text}"
     )
+
+
+@pytest.fixture(scope="session")
+def smtp_ready(request: pytest.FixtureRequest, config_client: ConfigClient) -> str:
+    """SMTP settings exist on the deployment, for routes behind smtpConfigCheck.
+
+    Unlike ``smtp_configured`` this leaves settings that the deployment already
+    has as they are. Only a deployment with none gets those of the SMTP_* env,
+    and the API cannot remove them again. Returns which of the two it was.
+    """
+    resp = config_client.get("/smtpConfig/status")
+    assert resp.status_code == 200, f"SMTP status: {resp.status_code} {resp.text}"
+    if resp.json().get("configured"):
+        return "the deployment already has SMTP settings"
+    request.getfixturevalue("smtp_configured")
+    return "written from the SMTP_* environment; the API cannot remove them"

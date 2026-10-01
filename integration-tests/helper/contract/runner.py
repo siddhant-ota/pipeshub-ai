@@ -17,6 +17,7 @@ from helper.contract.config import (
     BASE_URL_ENV,
     FILES_ENV,
     HEADERS_ENV,
+    LIMITED_ENV,
     LOGINS_ENV,
     STATIC_AUTHORIZATION_ENV,
     SUBSTITUTIONS_ENV,
@@ -25,6 +26,7 @@ from helper.contract.config import (
     build_config,
     build_files,
     build_headers,
+    build_limited,
     build_logins,
     build_substitutions,
     build_tokens,
@@ -34,14 +36,14 @@ from helper.contract.config import (
     write_config,
     write_json,
 )
-from helper.contract.redaction import redact_run_files
+from helper.contract.redaction import mask_text, redact_run_files
 from helper.contract.report import write_plan, write_report
 from helper.contract.results import OperationResult, collect
 from helper.contract.sources import SECRET, FixtureRow
 from helper.contract.spec import SPEC_PATH
 from helper.contract.stub_server import stub_server
 from helper.contract.suite import Suite
-from helper.contract.values import ContractValues
+from helper.contract.values import ContractValues, ValueOrPool
 
 INTEGRATION_TESTS_DIR = Path(__file__).resolve().parents[2]
 # A suite is a folder named `contract` with these files, under this root.
@@ -201,7 +203,7 @@ def _run_schemathesis(suite: Suite, files: RunFiles, *, api_url: str, env: dict[
             check=False,
         ).returncode
     if code not in _COMPLETED_EXIT_CODES:
-        tail = "\n".join(files.log.read_text(encoding="utf-8").splitlines()[-30:])
+        tail = mask_text("\n".join(files.log.read_text(encoding="utf-8").splitlines()[-30:]))
         raise RunnerError(f"Schemathesis exited with code {code}. Log: {files.log}\n{tail}")
     # `complete` in the summary only says that the engine exited by itself. It is also true when
     # the engine gave up, for example because the API stopped answering.
@@ -256,6 +258,20 @@ def _append_run(source: RunFiles, target: RunFiles) -> None:
     target.har.write_text(json.dumps(har), encoding="utf-8")
 
 
+def _secret_values(values: ContractValues) -> set[str]:
+    """The values that fixtures marked as credentials; a pool counts with each of its values."""
+    secret = (values.values[key] for key in values.secret if key in values.values)
+    return {
+        str(item) for value in secret for item in (value if isinstance(value, list) else [value])
+    }
+
+
+def _without_secrets(value: ValueOrPool, secrets: set[str]) -> ValueOrPool:
+    if isinstance(value, list):
+        return [SECRET if item in secrets else item for item in value]
+    return SECRET if str(value) in secrets else value
+
+
 def _prepare(
     suite: Suite, values: ContractValues, files: RunFiles, selected: set[str] | None
 ) -> tuple[list[OperationRun], dict[str, Any], dict[str, str]]:
@@ -264,12 +280,12 @@ def _prepare(
     config = build_config(suite, runs)
     write_config(config, files.config)
     substitutions = build_substitutions(suite, values, runs)
-    secrets = {values.values[key] for key in values.secret if key in values.values}
+    secrets = _secret_values(values)
     # For reading. The hooks get the values through the environment, where a credential
     # among them does not end up in a report folder.
     write_json(
         {
-            label: {name: SECRET if value in secrets else value for name, value in fields.items()}
+            label: {name: _without_secrets(value, secrets) for name, value in fields.items()}
             for label, fields in substitutions.items()
         },
         files.substitutions,
@@ -278,6 +294,7 @@ def _prepare(
         SUBSTITUTIONS_ENV: json.dumps(substitutions),
         FILES_ENV: json.dumps(build_files(suite, values, runs)),
         HEADERS_ENV: json.dumps(build_headers(suite, values, runs)),
+        LIMITED_ENV: json.dumps(build_limited(runs)),
         LOGINS_ENV: json.dumps(build_logins(suite, runs)),
         TOKENS_ENV: json.dumps(build_tokens(suite, values, runs)),
     }
@@ -320,8 +337,14 @@ def execute(
                 suite, files, runs, config, api_url=api_url, env={**env, BASE_URL_ENV: base_url}
             )
         finally:
-            secrets = {str(values.values[key]) for key in values.secret if key in values.values}
-            redact_run_files((files.events, files.har), secrets)
+            secrets = _secret_values(values)
+            passes_files = (files, RunFiles(files.directory / _LAST_PASS))
+            redact_run_files(
+                events=[each.events for each in passes_files],
+                hars=[each.har for each in passes_files],
+                logs=[each.log for each in passes_files],
+                secrets=secrets,
+            )
     return judge(suite, baseline_path)
 
 

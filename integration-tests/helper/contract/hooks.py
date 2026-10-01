@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import itertools
+from collections import defaultdict
 import json
 import mimetypes
 import os
@@ -26,6 +27,7 @@ from helper.contract.config import (
     BASE_URL_ENV,
     FILES_ENV,
     HEADERS_ENV,
+    LIMITED_ENV,
     LOGINS_ENV,
     STATIC_AUTHORIZATION_ENV,
     SUBSTITUTIONS_ENV,
@@ -43,13 +45,15 @@ from helper.contract.values import (
 )
 
 _NEGATIVE = "negative"
+_UNKNOWN_PROPERTY = "object_unexpected_properties"
+_MULTIPART = "multipart/"
 # Log in again this long before the session token expires.
 _EXPIRY_MARGIN_SEC = 120
 # How long a session token is used when it does not say when it expires.
 _DEFAULT_LIFETIME_SEC = 600
 
 
-def _from_env(name: str) -> dict[str, Any]:
+def _from_env(name: str) -> Any:
     return json.loads(os.getenv(name) or "{}")
 
 
@@ -63,8 +67,11 @@ _FILES: dict[str, dict[str, str]] = _from_env(FILES_ENV)
 _HEADERS: dict[str, dict[str, str]] = _from_env(HEADERS_ENV)
 _LOGINS: dict[str, str] = _from_env(LOGINS_ENV)
 _TOKENS: dict[str, str] = _from_env(TOKENS_ENV)
+_LIMITED: frozenset[str] = frozenset(_from_env(LIMITED_ENV) or ())
 # The number of the request, for values that must be different in each one.
 _case_numbers = itertools.count(1)
+# Operation label -> how many requests it has had, to take the next value from a pool.
+_turns: dict[str, itertools.count[int]] = defaultdict(itertools.count)
 
 
 def _expiry(token: str) -> float:
@@ -163,21 +170,33 @@ def _real_part(part: Any, path: Path) -> Any:
     return (*real, content_type) if content_type else real
 
 
-def _send_real_files(
+def _as_sent(value: Any) -> Any:
+    """A form value as a client writes it. Schemathesis sends a boolean as `True`."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return value
+
+
+def _form_part(part: Any, real_file: Path | None) -> Any:
+    """One part of a multipart body, as Schemathesis built it, corrected for the wire."""
+    if not isinstance(part, tuple) or len(part) < 2:
+        return _as_sent(part)
+    if part[0] is None:
+        return (None, _as_sent(part[1]), *part[2:])
+    return _real_part(part, real_file) if real_file else part
+
+
+def _send_form_parts(
     case: schemathesis.Case, kwargs: dict[str, Any], mutation: Mutation | None
 ) -> None:
-    """Send a real file where the body has a file field that the suite gives a file for.
+    """Build the parts of a multipart body here, to correct two things in them.
 
     Schemathesis generates an empty file and names it after its form field. An API that looks
-    at the extension or the content rejects that, so no generated upload could succeed.
+    at the extension or the content rejects that, so no generated upload could succeed: a file
+    field gets the real file that the suite gives for it. And Schemathesis writes a boolean
+    field as `True`, which is the Python word and not what an API reads as a boolean.
     """
-    # A plan has placeholders for the values of fixtures; those name no file.
-    files = {
-        name: path
-        for name, path in _FILES.get(case.operation.label, {}).items()
-        if Path(path).is_file()
-    }
-    if not isinstance(case.body, dict) or not set(files) & set(case.body):
+    if not isinstance(case.body, dict) or not (case.media_type or "").startswith(_MULTIPART):
         return
     body = prepare_body(case)
     if not isinstance(body, dict):
@@ -187,17 +206,30 @@ def _send_real_files(
     parts = multipart_serializer(SerializationContext(case=case), dict(body)).get("files")
     if not parts:
         return
-    kwargs["files"] = [
-        (
-            name,
-            part
-            if name not in files
-            or is_under_test(Substitution(BODY, (name,), ""), mutation)
-            or is_under_test(Substitution(BODY, (name, ANY_ITEM), ""), mutation)
-            else _real_part(part, Path(files[name])),
-        )
-        for name, part in parts
-    ]
+    # A plan has placeholders for the values of fixtures; those name no file.
+    files = {
+        name: Path(path)
+        for name, path in _FILES.get(case.operation.label, {}).items()
+        if Path(path).is_file()
+        and not is_under_test(Substitution(BODY, (name,), ""), mutation)
+        and not is_under_test(Substitution(BODY, (name, ANY_ITEM), ""), mutation)
+    }
+    kwargs["files"] = [(name, _form_part(part, files.get(name))) for name, part in parts]
+
+
+def _is_valid_in_disguise(case: schemathesis.Case) -> bool:
+    """True for a request that is invalid only because it has a property the spec does not know.
+
+    PipesHub does not reject an unknown property; it drops it and goes on. To the API such a
+    request is a valid one. For an operation whose valid requests are limited, because they
+    call an LLM or send an email, that is exactly the request the suite must not send.
+    """
+    meta = case.meta
+    return (
+        case.operation.label in _LIMITED
+        and meta is not None
+        and _name(getattr(meta.phase.data, "scenario", None)) == _UNKNOWN_PROPERTY
+    )
 
 
 def _holds_a_file(value: Any) -> bool:
@@ -231,12 +263,15 @@ def before_call(
     # A redirect is the answer to check: the spec documents the 302. Following it would judge
     # the response of another page, and send a request to wherever a generated URL points.
     kwargs.setdefault("allow_redirects", False)
-    for name, value in _HEADERS.get(case.operation.label, {}).items():
+    label = case.operation.label
+    for name, value in _HEADERS.get(label, {}).items():
         case.headers[name] = value
-    number = next(_case_numbers)
+    if _is_valid_in_disguise(case):
+        # Sent without a login, so that the API turns it away and does nothing.
+        case.headers.pop("Authorization", None)
+    number, turn = next(_case_numbers), next(_turns[label])
     substitutions = [
-        substitution.for_case(number)
-        for substitution in _SUBSTITUTIONS.get(case.operation.label, ())
+        substitution.for_case(number, turn) for substitution in _SUBSTITUTIONS.get(label, ())
     ]
     # Read before anything is replaced: Schemathesis looks at a changed request again, and may
     # then describe it differently.
@@ -259,5 +294,5 @@ def before_call(
             setattr(case, attribute, replaced)
             if substitution.location == BODY:
                 _keep_the_label_of_a_file_body(case)
-    # After the values: the file parts are built from the body, with the other fields of the form.
-    _send_real_files(case, kwargs, body_mutation)
+    # After the values: the parts are built from the body, with every field of the form.
+    _send_form_parts(case, kwargs, body_mutation)

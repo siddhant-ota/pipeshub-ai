@@ -312,10 +312,16 @@ generates valid and invalid requests from the spec, including the boundary value
 constraint, and each response is checked against the spec. There is one test per operation;
 the API is the reference, so a failure means the spec says something else than the API does.
 
+Every operation of the spec is in one of 16 suites, one per route group
+(`response-validation/<module>/contract/`); a unit test fails when a new operation is in none.
+`python -m helper.contract overview` writes one page that lists, for every suite, the
+operations that are not run in full with the reason, and every fixture with what it creates.
+
 These tests are marked `contract`, not `integration`, so the shards above do not run them.
-A run sends about 4,300 requests and creates, changes and deletes data, so use a deployment
-that holds nothing anyone needs. `pytest -m contract --collect-only -q` lists the tests and
-sends nothing. Everything else is in [`helper/contract/README.md`](helper/contract/README.md).
+A run of all suites sends about 12,000 requests and creates, changes and deletes users,
+knowledge bases, connectors and settings, so use a deployment that holds nothing anyone
+needs. `pytest -m contract --collect-only -q` lists the tests and sends nothing. Everything
+else is in [`helper/contract/README.md`](helper/contract/README.md).
 
 ---
 
@@ -377,7 +383,7 @@ Tests clone the [pipeshub-ai/integration-test](https://github.com/pipeshub-ai/in
 | `response-validation/mcp/` | MCP surface tests and the per-version golden files. |
 | `helper/pipeshub_client.py` | HTTP client for Pipeshub connector API (client_credentials). |
 | `helper/contract/` | Contract tests: runs Schemathesis for a suite and judges where the spec and the API differ. See its README. |
-| `response-validation/enterprise-search/contract/` | The enterprise-search contract suite (`suite.yaml`), its accepted differences (`baseline.json`) and its tests. |
+| `response-validation/<module>/contract/` | One contract suite per route group: how each operation is run (`suite.yaml`), its fixtures (`conftest.py`), its accepted differences (`baseline.json`) and its test module. |
 | `helper/graph_provider.py` | `GraphProviderProtocol` — common graph test helper interface. |
 | `helper/graph_provider_utils.py` | Shared polling helpers (`wait_until_graph_condition`, etc.). |
 | `helper/neo4j_integration/test_neo4j_provider.py` | `TestNeo4jProvider` — extends backend `Neo4jProvider` with graph validation helpers. |

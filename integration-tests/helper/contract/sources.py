@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from helper.contract.suite import PROFILE_SKIP, Suite
-from helper.contract.values import ContractValues, Value
+from helper.contract.values import ContractValues, ValueOrPool
 
 # The fixtures of a suite are in the conftest.py next to its suite file.
 CONFTEST_NAME = "conftest.py"
@@ -45,7 +45,7 @@ class FixtureRow:
     # IDs of the operations that use one of its values.
     operations: tuple[str, ...] = ()
     # value key -> the value in this run; empty in a plan
-    values: dict[str, Value] = field(default_factory=dict)
+    values: dict[str, ValueOrPool] = field(default_factory=dict)
     # Why the fixture gave no values in this run, or "".
     problem: str = ""
 
@@ -62,7 +62,15 @@ class FixtureRow:
                 for key in self.keys
                 if key in values.values
             },
-            problem=next((values.missing[key] for key in self.keys if key in values.missing), ""),
+            problem=next(
+                (
+                    reasons[key]
+                    for reasons in (values.missing, values.unavailable)
+                    for key in self.keys
+                    if key in reasons
+                ),
+                "",
+            ),
         )
 
 

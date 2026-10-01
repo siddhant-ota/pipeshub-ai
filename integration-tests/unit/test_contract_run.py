@@ -24,6 +24,7 @@ from helper.contract.config import (
     STATE_FULL,
     STATE_NEGATIVE_ONLY,
     STATE_SKIPPED,
+    STATE_UNAVAILABLE,
     STATE_VALUE_MISSING,
     build_config,
     build_logins,
@@ -717,3 +718,114 @@ def test_a_form_field_next_to_a_real_file_gets_its_value(
     # The hook keeps the label that the case had, or a good upload would count as an invalid
     # request that the API accepted.
     assert any(not case.is_negative for case in with_metadata)
+
+
+def test_a_form_boolean_is_sent_as_a_client_writes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Schemathesis writes `True`; an API that reads a form boolean wants `true`."""
+    folder = _planned(
+        tmp_path,
+        monkeypatch,
+        include_path_regex=r"^/knowledgeBase/\{kbId\}/upload$",
+        path_parameters={"defaults": [{"path_prefix": "/", "values": {"kbId": "kb.id"}}]},
+        ids_without_fixture=[{"field": "query.folderId", "reason": "Not needed for this test."}],
+    )
+    bodies = [
+        case.request_body
+        for case in read_cases(folder / "events.ndjson")
+        if 'name="isVersioned"' in case.request_body and not case.is_negative
+    ]
+
+    assert bodies
+    values = {body.split('name="isVersioned"')[1].split("\r\n")[2] for body in bodies}
+    assert values <= {"true", "false"}, values
+
+
+def _headers_by_what(folder: Path) -> dict[str, list[dict[str, str]]]:
+    """What each case sends -> the headers of its requests, from the HAR file."""
+    har = json.loads((folder / "requests.har").read_text(encoding="utf-8"))["log"]["entries"]
+    cases = list(read_cases(folder / "events.ndjson"))
+    assert len(har) == len(cases)
+    by_what: dict[str, list[dict[str, str]]] = {}
+    for case, entry in zip(cases, har, strict=True):
+        headers = {header["name"]: header["value"] for header in entry["request"]["headers"]}
+        by_what.setdefault(case.what, []).append(headers)
+    return by_what
+
+
+@pytest.mark.parametrize(
+    ("profile", "logs_in"),
+    [
+        ({}, True),
+        ({"negative_only": [{"reason": "x", "operations": ["updateConversationTitle"]}]}, False),
+    ],
+    ids=["full", "invalid requests only"],
+)
+def test_an_unknown_property_is_no_way_around_a_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, profile: dict, logs_in: bool
+) -> None:
+    """PipesHub drops an unknown property and goes on, so that request is a valid one to it.
+
+    Where the valid requests of an operation are limited, it is sent without a login.
+    """
+    folder = _planned(
+        tmp_path,
+        monkeypatch,
+        include_path_regex=r"^/conversations/\{conversationId\}/title$",
+        path_parameters={
+            "defaults": [{"path_prefix": "/", "values": {"conversationId": "conversation.id"}}]
+        },
+        **profile,
+    )
+    by_what = _headers_by_what(folder)
+
+    unknown = [what for what in by_what if "unexpected properties" in what]
+    assert unknown
+    for what, requests_headers in by_what.items():
+        for headers in requests_headers:
+            assert ("Authorization" in headers) is (logs_in or what not in unknown), what
+
+
+def test_a_pool_gives_each_request_of_an_operation_the_next_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pool = ["a" * 24, "b" * 24, "c" * 24]
+    # A plan gives every fixture value the placeholder; here the placeholder is a pool.
+    monkeypatch.setattr(runner, "_PLACEHOLDER", pool)
+
+    folder = _planned(
+        tmp_path,
+        monkeypatch,
+        include_path_regex=r"^/conversations/\{conversationId\}/archive$",
+        path_parameters={
+            "defaults": [{"path_prefix": "/", "values": {"conversationId": "conversation.pool"}}]
+        },
+    )
+    sent = [
+        case.target.split("/")[2]
+        for case in read_cases(folder / "events.ndjson")
+        if not case.is_negative
+    ]
+
+    assert sent and sent == [pool[index % 3] for index in range(len(sent))]
+
+
+def test_an_operation_whose_fixture_skipped_is_skipped_not_failed(suite: Suite) -> None:
+    """A fixture skips when the deployment cannot give what it needs. Nothing is wrong then."""
+    values = ContractValues(
+        values={"thing.id": "T1", "kb.id": "K1", "llm.key": "M1"},
+        unavailable={"project.id": "no SMTP settings (fixture `smtp_ready`)"},
+    )
+
+    runs = {run.operation_id: run for run in plan_run(suite, values)}
+
+    assert runs["listThings"].state == STATE_UNAVAILABLE
+    assert runs["listThings"].reason == (
+        "Not possible on this deployment: no SMTP settings (fixture `smtp_ready`)"
+    )
+    assert not runs["listThings"].is_sent
+    # A fixture that broke still fails the operation, whatever else skipped.
+    values.missing["project.id"] = "fixture `contract_project` failed"
+    del values.unavailable["project.id"]
+    assert plan_run(suite, values)[0].state == STATE_VALUE_MISSING
