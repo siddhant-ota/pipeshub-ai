@@ -313,7 +313,7 @@ constraint, and each response is checked against the spec. There is one test per
 the API is the reference, so a failure means the spec says something else than the API does.
 
 These tests are marked `contract`, not `integration`, so the shards above do not run them.
-A run sends about 4,400 requests and creates, changes and deletes data, so use a deployment
+A run sends about 4,300 requests and creates, changes and deletes data, so use a deployment
 that holds nothing anyone needs. `pytest -m contract --collect-only -q` lists the tests and
 sends nothing. Everything else is in [`helper/contract/README.md`](helper/contract/README.md).
 

@@ -13,7 +13,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from helper.contract.baseline import write_baseline
+from helper.contract.baseline import BaselineError, write_baseline
 from helper.contract.runner import RunnerError, judge, plan
 from helper.contract.suite import SuiteError, load_suite
 
@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
             run = judge(suite, baseline_path(args.suite))
         print(f"Report: {run.files.report}")
         return 0
-    except (SuiteError, RunnerError) as exc:
+    except (SuiteError, RunnerError, BaselineError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 

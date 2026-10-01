@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from contract_samples import case_event, operation_run, write_events
 
-from helper.contract.baseline import load_baseline, write_baseline
+from helper.contract.baseline import BaselineError, load_baseline, write_baseline
 from helper.contract.config import (
     STATE_DESELECTED,
     STATE_NEGATIVE_ONLY,
@@ -22,6 +22,7 @@ from helper.contract.results import (
     RESPONSE_SCHEMA,
     STATUS_CODE,
     VERDICT_DESELECTED,
+    VERDICT_INCOMPLETE,
     VERDICT_KNOWN_MISMATCH,
     VERDICT_MATCH,
     VERDICT_MISMATCH,
@@ -29,6 +30,7 @@ from helper.contract.results import (
     VERDICT_PARTIAL,
     VERDICT_SKIPPED,
     VERDICT_STALE_BASELINE,
+    VERDICT_STALE_SUITE,
     VERDICT_UNVERIFIED,
     FindingKey,
     OperationResult,
@@ -159,18 +161,21 @@ def test_a_body_finding_does_not_repeat_the_field_name(tmp_path: Path) -> None:
     assert (key.subject, key.detail) == ("body.name", "Incorrect type")
 
 
+def _schema_failure(validator_message: str, where: str, schema: str, value: str) -> str:
+    """A `response_schema_conformance` message the way Schemathesis lays it out."""
+    title = f"Schema at {where}" if where else "Schema"
+    return f"{validator_message}\n\n{title}:\n\n{schema}\n\nValue:\n\n    {value}"
+
+
 def test_a_schema_difference_is_identified_by_the_rule_not_by_the_value(tmp_path: Path) -> None:
     def wrong_type(case_id: str, value: str) -> dict:
-        return case_event(
-            LIST,
-            case_id=case_id,
-            failed={
-                RESPONSE_SCHEMA: (
-                    f'{value} is not of type "string"\n\n'
-                    "Schema at /components/schemas/Thing/properties/id:\n\n    {}\n"
-                )
-            },
+        message = _schema_failure(
+            f'{value} is not of type "string"',
+            "/components/schemas/Thing/properties/id",
+            '    {\n        "type": "string",\n        "description": "The id."\n    }',
+            value,
         )
+        return case_event(LIST, case_id=case_id, failed={RESPONSE_SCHEMA: message})
 
     result = _collect(tmp_path, [wrong_type("c1", "null"), wrong_type("c2", '["a","b"]')])
 
@@ -179,21 +184,72 @@ def test_a_schema_difference_is_identified_by_the_rule_not_by_the_value(tmp_path
             "listThings",
             RESPONSE_SCHEMA,
             "status 200 /components/schemas/Thing/properties/id",
-            'is not of type "string"',
+            'type "string"',
         )
     ]
+    (finding,) = result.findings.values()
+    assert finding.count == 2
+    assert finding.summary.endswith('the response does not satisfy `type "string"`')
 
 
-def test_a_missing_required_property_keeps_its_name(tmp_path: Path) -> None:
-    missing = case_event(
-        LIST,
-        case_id="c1",
-        failed={
-            RESPONSE_SCHEMA: '"items" is a required property\n\nValidated against the response schema'
-        },
+@pytest.mark.parametrize(
+    ("validator_message", "schema", "expected"),
+    [
+        # The messages are the validator's (jsonschema_rs); each quotes a value from the response.
+        (
+            '"abcdef" is longer than 2 characters',
+            '    {\n        "maxLength": 2\n    }',
+            "maxLength 2",
+        ),
+        ("[1,2,3] has more than 1 item", '    {\n        "maxItems": 1,\n    }', "maxItems 1"),
+        (
+            '"the answer is not known" is not one of "a" or "b"',
+            '    {\n        "enum": [\n            "a",\n            "b"\n        ]\n    }',
+            "enum",
+        ),
+        (
+            '{"a":" is not "} is not valid under any of the schemas listed in the \'anyOf\' keyword',
+            '    {\n        "anyOf": [\n            {\n                "type": "string"\n            }\n        ]\n    }',
+            "anyOf",
+        ),
+        ('False schema does not allow "secret"', "    false", "false"),
+        # These two name a property of the spec, and the property is the difference.
+        (
+            '"items" is a required property',
+            '    {\n        "required": [\n            "items"\n        ]\n    }',
+            '"items" is a required property',
+        ),
+        (
+            "Additional properties are not allowed ('status' was unexpected)",
+            '    {\n        "additionalProperties": false,\n        "type": "object"\n    }',
+            "Additional properties are not allowed ('status' was unexpected)",
+        ),
+    ],
+)
+def test_the_rule_of_a_schema_difference_holds_no_response_value(
+    tmp_path: Path, validator_message: str, schema: str, expected: str
+) -> None:
+    message = _schema_failure(validator_message, "/components/schemas/Thing", schema, "...")
+
+    (key,) = _collect(
+        tmp_path, [case_event(LIST, case_id="c1", failed={RESPONSE_SCHEMA: message})]
+    ).findings
+
+    assert key.subject == "status 200 /components/schemas/Thing"
+    assert key.detail == expected
+
+
+def test_a_difference_at_the_top_of_the_response_schema(tmp_path: Path) -> None:
+    message = _schema_failure(
+        '"items" is a required property\n\nValidated against the response schema for status code 200.',
+        "",
+        '    {\n        "required": [\n            "items"\n        ]\n    }',
+        "{}",
     )
 
-    (key,) = _collect(tmp_path, [missing]).findings
+    (key,) = _collect(
+        tmp_path, [case_event(LIST, case_id="c1", failed={RESPONSE_SCHEMA: message})]
+    ).findings
 
     assert (key.subject, key.detail) == (
         "status 200 response body",
@@ -259,12 +315,12 @@ def test_an_unknown_body_property_is_a_spec_difference(tmp_path: Path) -> None:
 
 
 def test_a_rejected_request_that_names_nothing_real_is_not_judged(tmp_path: Path) -> None:
-    """The suite waives `body.toolsets[*].instanceId`, so its value is random and no toolset has it."""
+    """`body.toolsets[*].instanceId` has no fixture, so its value is random and no toolset has it."""
     run = operation_run(
         "createThing",
         "POST",
         "/things",
-        waived_fields=("body.toolsets[*].instanceId", "query.runId"),
+        fixtureless_fields=("body.toolsets[*].instanceId", "query.runId"),
     )
     failed = {POSITIVE_ACCEPTANCE: "Valid data should have been accepted"}
     data = {
@@ -308,6 +364,12 @@ def test_a_rejected_request_that_names_nothing_real_is_not_judged(tmp_path: Path
     assert [key.subject for key in judged.findings] == ["body.name"]
     assert judged.unjudged == 0
 
+    # A field whose value the client may choose is not in the list: its request is judged.
+    client_chosen = _collect(
+        tmp_path, [with_run_id], run=operation_run("createThing", "POST", "/things")
+    )
+    assert len(client_chosen.findings) == 1
+
 
 def test_no_2xx_response_leaves_the_operation_unverified(tmp_path: Path) -> None:
     not_found = case_event(LIST, case_id="c1", status=404, passed=(STATUS_CODE,))
@@ -316,6 +378,84 @@ def test_no_2xx_response_leaves_the_operation_unverified(tmp_path: Path) -> None
 
     assert result.verdict == VERDICT_UNVERIFIED
     assert "No request got a 2xx response" in result.gap
+
+
+def test_a_baseline_does_not_excuse_an_unverified_operation(tmp_path: Path) -> None:
+    """Known differences are an expected failure only if the operation was really exercised."""
+    rejected_wrongly = case_event(
+        LIST,
+        case_id="c1",
+        status=404,
+        mode="negative",
+        query="limit=101",
+        data={
+            "description": "Value greater than maximum",
+            "parameter": "limit",
+            "parameter_location": "query",
+        },
+        failed={STATUS_CODE: "Received: 404\nDocumented: 200, 400"},
+    )
+    known = {FindingKey("listThings", STATUS_CODE, "status 404", "")}
+
+    result = _collect(tmp_path, [rejected_wrongly], baseline=known)
+
+    assert result.verdict == VERDICT_UNVERIFIED
+
+
+def test_invalid_requests_that_never_reach_validation_prove_nothing(tmp_path: Path) -> None:
+    """A stale ID answers 404 to everything; Schemathesis counts that as "rejected"."""
+    run = operation_run(
+        "listThings", "GET", "/things", state=STATE_NEGATIVE_ONLY, reason="Calls the LLM."
+    )
+    not_found = case_event(
+        LIST, case_id="c1", status=404, mode="negative", passed=(NEGATIVE_REJECTION,)
+    )
+
+    result = _collect(tmp_path, [not_found], run=run)
+
+    assert result.verdict == VERDICT_UNVERIFIED
+    assert "No request was rejected as invalid (HTTP 400 or 422)" in result.gap
+
+
+def test_a_success_where_the_suite_says_there_is_none(tmp_path: Path) -> None:
+    run = operation_run("listThings", "GET", "/things", no_success_reason="Nothing to cancel.")
+
+    result = _collect(tmp_path, [VALID], run=run)
+
+    assert result.verdict == VERDICT_STALE_SUITE
+    assert "Remove it from `no_success_response`" in result.gap
+
+
+def test_a_request_without_a_response_makes_the_operation_incomplete(tmp_path: Path) -> None:
+    no_response = case_event(LIST, case_id="c2", status=None)
+
+    result = _collect(tmp_path, [VALID, no_response], baseline={LIMIT_KEY})
+
+    assert result.verdict == VERDICT_INCOMPLETE
+    assert dict(result.statuses) == {"200": 1, "no response": 1}
+    # The difference in the baseline did not show, but the run was cut short: it is not stale.
+    assert not result.stale
+    assert "did not complete" in result.gap
+
+
+def test_a_scenario_that_schemathesis_could_not_finish_makes_the_operation_incomplete(
+    tmp_path: Path,
+) -> None:
+    errored = case_event(LIST, case_id="ok", scenario_status="error", passed=(STATUS_CODE,))
+
+    result = _collect(tmp_path, [errored], baseline={LIMIT_KEY})
+
+    assert result.verdict == VERDICT_INCOMPLETE
+    assert not result.stale
+
+    path = tmp_path / "baseline.json"
+    path.write_text(
+        '{"format_version": 1, "findings": [{"operation": "listThings", '
+        f'"check": "{LIMIT_KEY.check}", "subject": "{LIMIT_KEY.subject}", '
+        f'"detail": "{LIMIT_KEY.detail}"}}]}}',
+        encoding="utf-8",
+    )
+    assert write_baseline(path, [result]) == (0, 0), "an incomplete run removes nothing"
 
 
 def test_a_declared_gap_is_partial_not_a_failure(tmp_path: Path) -> None:
@@ -400,8 +540,9 @@ def test_baseline_round_trip_keeps_notes_and_drops_what_is_fixed(tmp_path: Path)
     path = tmp_path / "baseline.json"
     found = _collect(tmp_path, [VALID, LIMIT_ABOVE_MAXIMUM])
 
+    operations = {"listThings", "createThing"}
     assert write_baseline(path, [found]) == (1, 0)
-    assert load_baseline(path) == {LIMIT_KEY}
+    assert load_baseline(path, operations) == {LIMIT_KEY}
 
     # A person adds a ticket to the entry, and another operation has an entry of its own.
     document = path.read_text(encoding="utf-8").replace(
@@ -413,11 +554,29 @@ def test_baseline_round_trip_keeps_notes_and_drops_what_is_fixed(tmp_path: Path)
 
     assert write_baseline(path, [found]) == (0, 0)
     assert '"ticket": "PA-1"' in path.read_text(encoding="utf-8")
-    assert len(load_baseline(path)) == 2, "an operation that did not run keeps its entries"
+    assert len(load_baseline(path, operations)) == 2, (
+        "an operation that did not run keeps its entries"
+    )
 
     fixed = _collect(tmp_path, [VALID])
     assert write_baseline(path, [fixed]) == (0, 1)
-    assert load_baseline(path) == {FindingKey("createThing", "x", "y", "z")}
+    assert load_baseline(path, operations) == {FindingKey("createThing", "x", "y", "z")}
+
+    # The suite no longer has `createThing`: its entry could never be found again or go stale.
+    with pytest.raises(BaselineError, match="operations that are not in the suite: createThing"):
+        load_baseline(path, {"listThings"})
+
+
+def test_a_baseline_entry_must_say_what_it_is_about(tmp_path: Path) -> None:
+    path = tmp_path / "baseline.json"
+    path.write_text('{"format_version": 1, "findings": [{"operation": "listThings"}]}')
+
+    with pytest.raises(BaselineError, match="needs operation, check and subject"):
+        load_baseline(path, {"listThings"})
+
+    path.write_text('{"format_version": 2, "findings": []}')
+    with pytest.raises(BaselineError, match="unsupported baseline format version 2"):
+        load_baseline(path, {"listThings"})
 
 
 def test_report_states_the_contract_and_the_coverage(tmp_path: Path) -> None:
@@ -444,7 +603,10 @@ def test_an_operation_with_differences_can_also_have_a_coverage_gap(tmp_path: Pa
     run = operation_run(
         "listThings", "GET", "/things", state=STATE_NEGATIVE_ONLY, reason="Calls the LLM."
     )
-    result = _collect(tmp_path, [LIMIT_ABOVE_MAXIMUM], run=run)
+    rejected = case_event(
+        LIST, case_id="c2", status=400, mode="negative", passed=(NEGATIVE_REJECTION,)
+    )
+    result = _collect(tmp_path, [LIMIT_ABOVE_MAXIMUM, rejected], run=run)
 
     assert result.verdict == VERDICT_MISMATCH
     assert summary_lines([result]) == [

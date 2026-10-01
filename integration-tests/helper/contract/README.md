@@ -32,7 +32,7 @@ tests, and it uses their fixtures and their login.
 
 ```bash
 cd integration-tests
-pytest -m contract                                  # the whole suite, about 4,400 requests
+pytest -m contract                                  # the whole suite, about 4,300 requests
 pytest -m contract --collect-only -q                # list the tests; sends nothing
 pytest "response-validation/enterprise-search/contract/integration_test_contract.py::test_spec_matches_api[GET /search]"
 ```
@@ -68,9 +68,19 @@ One test per operation. `report.md` in the output folder has the details.
 | xfailed | Known difference | Differences found; `baseline.json` lists every one |
 | failed | Differs | A difference that the baseline does not list |
 | failed | Stale baseline | The baseline lists a difference that no longer occurs; remove the entry |
-| failed | Unverified | No difference, but no request got a 2xx, so the success response is unchecked |
+| failed | Stale suite entry | The suite file says no request can succeed, and one did; remove the entry |
+| failed | Unverified | No difference, but the responses that would show one never came (see below) |
+| failed | Incomplete | A request got no response, or Schemathesis could not finish the operation |
 | failed | Not run | A value the operation needs is missing, for example a fixture failed |
 | skipped | Skipped | The suite file skips the operation, with a reason |
+
+"Unverified" means the operation was not really exercised: no request got a
+2xx, so the success response was never checked; or, for an operation that is
+only sent invalid requests, none was answered with 400 or 422, so nothing shows
+that they reached its validation (a stale ID answers 404 to everything).
+
+If Schemathesis stops before the end, for example because the API stops
+answering, the whole run is an error and nothing is judged.
 
 A run with no failure can still leave things unchecked. The terminal summary
 and the "Coverage gaps" section of the report list every such operation and why.
@@ -94,11 +104,14 @@ document it, and then `status_code_conformance` reports it.
 and accepted for now. A test fails only for a difference that is not in it, and
 for an entry that no longer occurs, so the file can only get shorter. A
 difference is identified by operation, check, field and rule, for example
-`searchHistory | negative_data_rejection | query.page | Value greater than maximum`.
+`searchHistory | negative_data_rejection | query.page | Value greater than maximum`
+or `listAgents | response_schema_conformance | status 200 /components/schemas/Toolset/properties/instanceId | type "string"`.
+No value from a response is part of it, so it is the same in every run.
 
 After a run, `python -m helper.contract accept <suite.yaml>` rewrites the
 baseline from what the run found. It keeps anything you added to an entry (a
-ticket, a note) and the entries of operations that the run did not send.
+ticket, a note) and the entries of operations that the run did not send or did
+not finish.
 Review the diff of `baseline.json` like any other change: every added line is a
 place where the spec is wrong.
 
@@ -112,8 +125,10 @@ spec and fails, before any request is sent, when they do not agree.
 | `include_path_regex` | Which paths of the spec are in scope |
 | `path_parameters` | The value key for each path parameter, for example `conversationId: conversation.mutable.id` |
 | `values` | Query and body fields that get a real value, for example `body.filters.kb[*]: knowledgeBase.id` |
-| `waived_id_fields` | ID fields that keep a generated value, each with a reason |
+| `client_chosen_ids` | ID fields whose value the client is free to choose, each with a reason |
+| `ids_without_fixture` | ID fields that must name something that exists and have no fixture, each with a reason |
 | `negative_only` | Operations that are only sent invalid requests, because a valid one calls the LLM |
+| `examples_only` | Operations whose valid requests are limited to the examples in the spec; all invalid ones are sent |
 | `no_success_response` | Operations for which no request can get a 2xx, each with a reason |
 | `created_resources` | What a successful test case creates, so the test can delete it |
 | `skip` | Operations that are not sent, each with a reason |
@@ -124,27 +139,35 @@ Schemathesis fills an ID field with a random string. The API then answers "not
 found", and no valid request with that field ever succeeds. Nothing fails, so
 the gap would be invisible. Therefore:
 
-- Every field that holds an ID must be in `values` or in `waived_id_fields`.
-  A field counts as an ID when its name ends in `Id`, `Ids` or `Key`, when it
-  has `format: uuid`, or when its description speaks of ids. A new such field
-  in the spec makes the suite fail to load until someone decides on it.
+- Every field that holds an ID must be in one of three lists. A field counts as
+  an ID when it is named `id`, `ids` or `key`, when its name ends in `Id`, `Ids`
+  or `Key`, when it has `format: uuid`, or when its description speaks of ids.
+  A new such field in the spec makes the suite fail to load until someone
+  decides on it.
+  - `values`: it gets a real value from a fixture.
+  - `client_chosen_ids`: any value is valid, for example a run ID that the
+    client makes up. It keeps the generated value.
+  - `ids_without_fixture`: it must name something that exists, and no fixture
+    provides that. It keeps the generated value, so a valid request with it
+    names nothing real. If the API rejects such a request, that is not counted
+    as a difference; the report says how many there were.
 - The value keys (`knowledgeBase.id`, ...) come from pytest fixtures, listed in
   `VALUE_SOURCES` in the suite's `conftest.py`.
 - If a fixture fails, its values are missing. The operations that need them are
   not sent and their tests fail with the reason; the rest still run.
-- A valid request that still has a generated value in a waived field names
-  something that does not exist. If the API rejects it, that is not counted as
-  a difference; the report says how many such cases there were.
 
 A value replaces a string that is already in the generated request. It is never
 added, and in an invalid request the field under test keeps its invalid value.
+No ID is taken from the response of an earlier request: that Schemathesis
+feature is off, so that a request does not depend on what ran before it.
 
 ### Roles
 
 Each fixture resource has a role, so that operations cannot disturb each other,
 in whatever order they run: `readonly` is only read, `mutable` is updated,
 `archivable` is archived by the archive operation, `archived` is already
-archived for the unarchive operation, and `disposable` is deleted by the DELETE
+archived for the unarchive operation, `linked` is already in a project for the
+project-visibility operation, and `disposable` is deleted by the DELETE
 operation under test.
 
 ## How a run works

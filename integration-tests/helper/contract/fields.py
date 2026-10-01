@@ -2,8 +2,9 @@
 
 Schemathesis fills an ID field with a random string. The backend then answers
 "not found" or "invalid", and no valid request with that field ever gets a 2xx.
-Nothing fails, so the gap is invisible. The suite must therefore give every ID
-field a real value or waive it with a reason; `suite.load_suite` enforces that.
+Nothing fails, so the gap is invisible. The suite must therefore decide on every
+ID field: give it a real value, or say why it keeps a generated one.
+`suite.load_suite` enforces that.
 """
 
 from __future__ import annotations
@@ -18,13 +19,18 @@ from helper.contract.spec import Operation, operation_definition, resolve
 ARRAY_ITEM = "[*]"
 # One element of an array, in a path that is split into segments.
 ANY_ITEM = "*"
+# A value under a key the spec does not name (`additionalProperties`).
+ANY_KEY = "{*}"
 
-_ID_NAME = re.compile(r"(?:Ids?|IDs?|_ids?|Keys?|_keys?)$")
+# `id`, `ids`, `key`, and names that end in `Id`, `Ids`, `_id`, `Key`, ...
+_ID_NAME = re.compile(r"^(?:ids?|keys?)$|(?:Ids?|IDs?|_ids?|Keys?|_keys?)$")
 _ID_DESCRIPTION = re.compile(r"\b(?:uuid|objectid|ids?)\b", re.IGNORECASE)
 _NOT_AN_ID_FORMAT = frozenset({"date-time", "date", "email", "uri", "binary"})
 _COMBINATORS = ("allOf", "anyOf", "oneOf")
-_MAX_DEPTH = 8
+# Deeper than any request body in the spec. A schema that goes past it is reported, not cut off.
+_MAX_DEPTH = 16
 _JSON = "application/json"
+_REF = "$ref"
 
 
 @dataclass(frozen=True)
@@ -63,6 +69,8 @@ def field_name(location: str, path: tuple[str, ...]) -> str:
 
 
 def _is_leaf(schema: dict[str, Any]) -> bool:
+    if isinstance(schema.get("additionalProperties"), dict):
+        return False
     return not any(key in schema for key in ("properties", "items", *_COMBINATORS))
 
 
@@ -86,20 +94,33 @@ def _inherit_description(parent: dict[str, Any], child: Any) -> Any:
 
 
 def _walk(
-    spec: dict[str, Any], schema: Any, path: str, name: str, depth: int
+    spec: dict[str, Any], schema: Any, path: str, name: str, refs: frozenset[str]
 ) -> Iterator[RequestField]:
-    schema = resolve(spec, schema)
-    if not isinstance(schema, dict) or depth > _MAX_DEPTH:
+    """`refs` are the references followed on the way here; meeting one again is a cycle."""
+    described_by = schema if isinstance(schema, dict) else {}
+    if isinstance(schema, dict) and isinstance(schema.get(_REF), str):
+        if schema[_REF] in refs:
+            return
+        refs = refs | {schema[_REF]}
+        schema = _inherit_description(described_by, resolve(spec, schema))
+    if not isinstance(schema, dict):
         return
+    if path.count(".") + path.count(ARRAY_ITEM) > _MAX_DEPTH:
+        raise ValueError(f"the schema nests deeper than {_MAX_DEPTH} levels at {path}")
+
     for combinator in _COMBINATORS:
         for branch in schema.get(combinator) or []:
-            branch = _inherit_description(schema, resolve(spec, branch))
-            yield from _walk(spec, branch, path, name, depth + 1)
+            yield from _walk(spec, _inherit_description(schema, branch), path, name, refs)
     for child, child_schema in (schema.get("properties") or {}).items():
-        yield from _walk(spec, child_schema, f"{path}.{child}", child, depth + 1)
+        yield from _walk(spec, child_schema, f"{path}.{child}", child, refs)
     if "items" in schema:
-        items = _inherit_description(schema, resolve(spec, schema["items"]))
-        yield from _walk(spec, items, f"{path}{ARRAY_ITEM}", name, depth + 1)
+        items = _inherit_description(schema, schema["items"])
+        yield from _walk(spec, items, f"{path}{ARRAY_ITEM}", name, refs)
+    free_form = schema.get("additionalProperties")
+    if isinstance(free_form, dict):
+        yield from _walk(
+            spec, _inherit_description(schema, free_form), f"{path}{ANY_KEY}", name, refs
+        )
     if name and _is_leaf(schema):
         yield RequestField(path, _holds_an_id(name, schema))
 
@@ -120,11 +141,11 @@ def request_fields(spec: dict[str, Any], operation: Operation) -> list[RequestFi
         parameter = resolve(spec, parameter)
         if parameter.get("in") != "query":
             continue
-        schema = _inherit_description(parameter, resolve(spec, parameter.get("schema") or {}))
-        _add(_walk(spec, schema, f"query.{parameter['name']}", parameter["name"], 0))
+        schema = _inherit_description(parameter, parameter.get("schema") or {})
+        _add(_walk(spec, schema, f"query.{parameter['name']}", parameter["name"], frozenset()))
 
     body = resolve(spec, definition.get("requestBody") or {})
     json_body = (body.get("content") or {}).get(_JSON) or {}
-    _add(_walk(spec, json_body.get("schema"), "body", "", 0))
+    _add(_walk(spec, json_body.get("schema"), "body", "", frozenset()))
 
     return sorted(found.values(), key=lambda field: field.name)

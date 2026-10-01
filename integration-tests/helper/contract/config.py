@@ -11,6 +11,7 @@ from typing import Any
 import tomli_w
 
 from helper.contract.suite import (
+    PROFILE_EXAMPLES_ONLY,
     PROFILE_NEGATIVE_ONLY,
     PROFILE_SKIP,
     PlannedOperation,
@@ -29,6 +30,8 @@ STATIC_AUTHORIZATION_ENV = "CONTRACT_STATIC_AUTHORIZATION"
 
 # All valid and invalid cases are sent.
 STATE_FULL = "full"
+# All invalid cases; of the valid ones only the examples that the spec gives.
+STATE_EXAMPLES_ONLY = "examples_only"
 # Invalid cases only; the success response is not checked.
 STATE_NEGATIVE_ONLY = "negative_only"
 # The suite file skips the operation.
@@ -50,12 +53,13 @@ class OperationRun:
     state: str
     reason: str = ""
     no_success_reason: str = ""
-    # ID fields that keep a generated value; see results._names_nothing_real.
-    waived_fields: tuple[str, ...] = ()
+    # Fields that must name something that exists and have no fixture value;
+    # see results._names_nothing_real.
+    fixtureless_fields: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OperationRun:
-        return cls(**{**data, "waived_fields": tuple(data.get("waived_fields") or ())})
+        return cls(**{**data, "fixtureless_fields": tuple(data.get("fixtureless_fields") or ())})
 
     @property
     def label(self) -> str:
@@ -63,7 +67,7 @@ class OperationRun:
 
     @property
     def is_sent(self) -> bool:
-        return self.state in (STATE_FULL, STATE_NEGATIVE_ONLY)
+        return self.state in (STATE_FULL, STATE_EXAMPLES_ONLY, STATE_NEGATIVE_ONLY)
 
 
 def _state_for(
@@ -81,6 +85,8 @@ def _state_for(
         return STATE_VALUE_MISSING, f"Missing value: {reasons}"
     if planned.profile == PROFILE_NEGATIVE_ONLY:
         return STATE_NEGATIVE_ONLY, planned.reason
+    if planned.profile == PROFILE_EXAMPLES_ONLY:
+        return STATE_EXAMPLES_ONLY, planned.reason
     return STATE_FULL, ""
 
 
@@ -101,7 +107,7 @@ def plan_run(
                 state=state,
                 reason=reason,
                 no_success_reason=planned.no_success_reason,
-                waived_fields=planned.waived_fields,
+                fixtureless_fields=planned.fixtureless_fields,
             )
         )
     return runs
@@ -125,9 +131,13 @@ def build_config(suite: Suite, values: ContractValues, runs: list[OperationRun])
             block["parameters"] = {
                 f"path.{name}": values.values[key] for name, key in planned.path_values.items()
             }
-        if run.state == STATE_NEGATIVE_ONLY:
+        if run.state in (STATE_NEGATIVE_ONLY, STATE_EXAMPLES_ONLY):
+            # This limits the coverage phase to invalid requests. The examples phase still
+            # sends the spec's own examples, which are valid requests. (A mode set for the
+            # coverage phase alone has no effect: Schemathesis 4.28 builds the coverage cases
+            # from the operation's generation settings, without the phase.)
             block["generation"] = {"mode": "negative"}
-            # The examples phase sends the spec's own examples, which are valid requests.
+        if run.state == STATE_NEGATIVE_ONLY:
             block["phases"] = {"examples": {"enabled": False}}
         if len(block) > 1:
             blocks.append(block)

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from helper.contract.results import (
+    VERDICT_INCOMPLETE,
     VERDICT_KNOWN_MISMATCH,
     VERDICT_MATCH,
     VERDICT_MISMATCH,
@@ -14,12 +15,20 @@ from helper.contract.results import (
     VERDICT_PARTIAL,
     VERDICT_SKIPPED,
     VERDICT_STALE_BASELINE,
+    VERDICT_STALE_SUITE,
     VERDICT_UNVERIFIED,
     Finding,
     OperationResult,
 )
 
 _MAX_LISTED = 15
+# Verdicts for which `OperationResult.gap` says everything there is to say.
+_FAILS_WITH_ITS_GAP = (
+    VERDICT_UNVERIFIED,
+    VERDICT_NOT_RUN,
+    VERDICT_INCOMPLETE,
+    VERDICT_STALE_SUITE,
+)
 
 
 def _listed(findings: list[Finding]) -> str:
@@ -38,7 +47,8 @@ def assert_spec_matches_api(result: OperationResult, report: Path) -> None:
 
     Fails for anything that leaves the contract of the operation unproven: a
     difference the baseline does not list, a baseline entry that no longer
-    occurs, no 2xx response to check, or no request sent at all.
+    occurs, responses that do not show the operation was exercised, a run that
+    did not complete, or no request sent at all.
     """
     verdict = result.verdict
     label = result.run.label
@@ -68,6 +78,6 @@ def assert_spec_matches_api(result: OperationResult, report: Path) -> None:
             f"{stale}\nRemove them with `python -m helper.contract accept <suite.yaml>`.",
             pytrace=False,
         )
-    if verdict in (VERDICT_UNVERIFIED, VERDICT_NOT_RUN):
+    if verdict in _FAILS_WITH_ITS_GAP:
         pytest.fail(f"{label}: {result.gap}", pytrace=False)
     raise AssertionError(f"{label}: no pytest outcome for verdict {verdict!r}")

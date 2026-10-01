@@ -71,6 +71,24 @@ SPEC: dict[str, Any] = {
                             },
                         },
                     },
+                    # A field named exactly `id`.
+                    "tags": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"id": {"type": "string"}, "label": {"type": "string"}},
+                        },
+                    },
+                    # Values under keys that the spec does not name.
+                    "notes": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": {"authorId": {"type": "string"}},
+                        },
+                    },
+                    # A schema that contains itself.
+                    "parent": {"$ref": "#/components/schemas/NewThing"},
                 },
             },
             "Filters": {
@@ -99,7 +117,13 @@ SUITE: dict[str, Any] = {
         "body.filters.kb[*]": "kb.id",
         "body.models[*].modelKey": "llm.key",
     },
-    "waived_id_fields": [{"field": "body.ownerId", "reason": "Any string is accepted."}],
+    "client_chosen_ids": [
+        {"field": "body.ownerId", "reason": "Any string is accepted."},
+        {"field": "body.tags[*].id", "reason": "The client names its tags."},
+    ],
+    "ids_without_fixture": [
+        {"field": "body.notes{*}.authorId", "reason": "No user fixture."},
+    ],
 }
 
 
@@ -123,7 +147,8 @@ def case_event(
     label: str,
     *,
     case_id: str,
-    status: int = 200,
+    status: int | None = 200,
+    scenario_status: str = "success",
     mode: str = "positive",
     query: str = "",
     body: Any = None,
@@ -134,7 +159,8 @@ def case_event(
 ) -> dict[str, Any]:
     """One `ScenarioFinished` event with a single case, shaped like Schemathesis 4 writes it.
 
-    `failed` maps a check name to its failure message.
+    `failed` maps a check name to its failure message. `status=None` is a request
+    that got no response.
     """
     method, path = label.split(" ", 1)
     request: dict[str, Any] = {
@@ -152,9 +178,16 @@ def case_event(
         }
         for name, message in (failed or {}).items()
     ]
+    interaction: dict[str, Any] = {"request": request}
+    if status is not None:
+        interaction["response"] = {
+            "status_code": status,
+            "content": _encoded(response if response is not None else {}),
+        }
     return {
         "ScenarioFinished": {
             "phase": "coverage",
+            "status": scenario_status,
             "recorder": {
                 "label": label,
                 "cases": {
@@ -166,15 +199,7 @@ def case_event(
                     }
                 },
                 "checks": {case_id: checks},
-                "interactions": {
-                    case_id: {
-                        "request": request,
-                        "response": {
-                            "status_code": status,
-                            "content": _encoded(response if response is not None else {}),
-                        },
-                    }
-                },
+                "interactions": {case_id: interaction},
             },
         }
     }

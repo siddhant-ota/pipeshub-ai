@@ -13,7 +13,6 @@ import yaml
 from helper.openapi_search_validator import SPEC_PATH
 
 HTTP_METHODS = ("get", "post", "put", "patch", "delete")
-EVENT_STREAM = "text/event-stream"
 _PATH_PARAMETER = re.compile(r"\{([^}]+)\}")
 
 
@@ -23,7 +22,6 @@ class Operation:
     method: str
     path: str
     sdk: bool
-    streams: bool
 
     @property
     def path_parameters(self) -> tuple[str, ...]:
@@ -78,18 +76,12 @@ def operations_in_scope(spec: dict[str, Any], include_path_regex: str) -> list[O
             operation_id = definition.get("operationId")
             if not operation_id:
                 raise ValueError(f"{method.upper()} {path} has no operationId in the spec")
-            content_types = {
-                content_type
-                for response in (definition.get("responses") or {}).values()
-                for content_type in (resolve(spec, response).get("content") or {})
-            }
             operations.append(
                 Operation(
                     operation_id=operation_id,
                     method=method.upper(),
                     path=path,
                     sdk=bool(definition.get("x-pipeshub-sdk")),
-                    streams=EVENT_STREAM in content_types,
                 )
             )
     return operations

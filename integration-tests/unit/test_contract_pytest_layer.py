@@ -79,6 +79,9 @@ class Conversations:
     def archive_conversation(self, *ids):
         return Response(200, {})
 
+    def set_project(self, *ids):
+        return Response(200, {})
+
 
 class Agents:
     def create_agent(self, **payload):
@@ -95,10 +98,17 @@ class Searches:
         return Response(200, {"searchId": "search-" + query.split()[1]})
 
     def delete_search(self, search_id):
+        with DELETED.open("a") as log:
+            log.write(f"search {search_id}\\n")
         return Response(200, {})
 
     def archive_search(self, search_id):
         return Response(200, {})
+
+    def unarchive_search(self, search_id):
+        with DELETED.open("a") as log:
+            log.write(f"unarchive {search_id}\\n")
+        return Response(404, {})
 
 
 class Projects:
@@ -138,6 +148,11 @@ def search_client():
 @pytest.fixture(scope="session")
 def projects_client():
     return Projects()
+
+
+@pytest.fixture(scope="session")
+def ai_models_configured():
+    return None
 
 
 @pytest.fixture(scope="session")
@@ -239,9 +254,14 @@ def test_each_operation_gets_the_outcome_of_its_verdict(project: Path) -> None:
     assert '"path.searchId" = "search-readonly"' in config
     assert '"path.conversationId" = "conversation-2"' in config, "the archivable conversation"
 
-    # The fixture conversations are deleted at the end.
-    deleted = (project / "deleted.txt").read_text(encoding="utf-8")
-    assert deleted.count("conversation ") == 8
+    # The fixtures are deleted at the end: four conversations and four agent conversations by
+    # role, and the two that are linked to a project. A search is unarchived first, because
+    # the API does not delete an archived one.
+    deleted = (project / "deleted.txt").read_text(encoding="utf-8").splitlines()
+    assert sum(line.startswith("conversation ") for line in deleted) == 10
+    searches = [line for line in deleted if not line.startswith("conversation ")]
+    assert searches[:2] == ["unarchive search-readonly", "search search-readonly"]
+    assert len(searches) == 8
 
 
 def test_a_known_difference_is_an_expected_failure(project: Path) -> None:

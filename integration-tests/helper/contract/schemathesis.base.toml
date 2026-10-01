@@ -20,16 +20,20 @@ with-security-parameters = false
 database = "none"
 
 # examples + coverage are deterministic: two runs send the same test cases, so
-# a finding has a stable identity and the baseline can name it.
-# Operations run in the order of the spec, not in an order that Schemathesis
-# derives from the responses, so that the order is the same in every run.
+# a finding has a stable identity and the baseline can name it. Two defaults
+# would make a request depend on the responses before it, and are off:
+# - operation-ordering: operations run in the order of the spec.
+# - extra-data-sources: no ID from an earlier response is put into a later
+#   request. The IDs come from the suite file, one fixture per role.
 [phases.examples]
 enabled = true
 operation-ordering = "none"
+extra-data-sources = { responses = false }
 
 [phases.coverage]
 enabled = true
 operation-ordering = "none"
+extra-data-sources = { responses = false }
 # By default this phase also sends methods the spec does not list for a path
 # (for example DELETE on a GET-only path). With real IDs such a request can
 # reach a route that exists but is not documented, and change or delete data.

@@ -12,7 +12,8 @@ include_path_regex: "^/(conversations|search|agents)(/|$)"
 #
 # Roles keep the operations apart, in whatever order they run: `readonly` is
 # only read, `mutable` is updated, `archivable` is archived by the archive
-# operation, `archived` is already archived for the unarchive operation, and
+# operation, `archived` is already archived for the unarchive operation,
+# `linked` is already in a project for the project-visibility operation, and
 # `disposable` is deleted by the DELETE operation.
 path_parameters:
   defaults:
@@ -36,6 +37,8 @@ path_parameters:
       conversationId: conversation.archivable.id
     unarchiveConversation:
       conversationId: conversation.archived.id
+    setConversationProjectVisibility:
+      conversationId: conversation.linked.id
     deleteConversationById:
       conversationId: conversation.disposable.id
 
@@ -56,12 +59,15 @@ path_parameters:
       conversationId: agentConversation.archivable.id
     unarchiveAgentConversation:
       conversationId: agentConversation.archived.id
+    setAgentConversationProjectVisibility:
+      conversationId: agentConversation.linked.id
     deleteAgentConversationById:
       conversationId: agentConversation.disposable.id
 
 # Query and body fields that get a real value wherever a request has them.
-# Every field that holds an ID must be here or in `waived_id_fields`; loading
-# the suite fails otherwise. A field applies to each operation that has it.
+# Loading the suite fails unless every field that holds an ID is in `values`,
+# `client_chosen_ids` or `ids_without_fixture`. A field applies to each
+# operation that has it.
 values:
   query.conversationId: conversation.readonly.id
   query.projectId: project.id
@@ -69,7 +75,8 @@ values:
   body.userIds[*]: user.second.id
   body.filters.kb[*]: knowledgeBase.id
   body.filters.apps[*]: knowledgeBase.id
-  body.recordIds[*]: knowledgeBase.recordId
+  body.appliedFilters.kb[*].id: knowledgeBase.id
+  body.appliedFilters.apps[*].id: knowledgeBase.id
   body.modelKey: llm.modelKey
   # An agent model is a (modelKey, modelName, provider) triple; a real key with
   # a random name or provider is still not a model that exists.
@@ -78,11 +85,22 @@ values:
   body.models[*].provider: llm.provider
   body.knowledge[*].connectorId: knowledgeBase.id
   body.knowledge[*].filters.records[*]: knowledgeBase.recordId
+  # The API accepts only a 24-hex ObjectId here (es_validators.ts), and the IDs
+  # of indexed records are UUIDs, so there is no real value to give. A
+  # well-formed one keeps this field from being the reason a request is rejected.
+  body.recordIds[*]: record.wellFormedId
 
-# ID fields that keep the value Schemathesis generates.
-waived_id_fields:
+# ID fields whose value the client is free to choose. They keep the generated
+# value, and a request with one is judged like any other.
+client_chosen_ids:
   - field: body.runId
     reason: The client chooses the run ID; it names no existing resource.
+
+# ID fields that must name something that exists, and for which no fixture
+# gives a value. They keep the generated value, so a valid request with one
+# names nothing real. If the API rejects it, that is not counted as a
+# difference; the report says how many such requests there were.
+ids_without_fixture:
   - field: body.attachments[*].recordId
     reason: Needs an uploaded chat attachment. The upload operations are skipped.
   - field: body.attachments[*].virtualRecordId
@@ -112,6 +130,13 @@ negative_only:
     - addAgentConversationMessage
     - streamAgentConversationMessage
     - regenerateAgentConversationMessage
+
+# All invalid requests are sent. Of the valid ones, only the examples that the
+# spec gives, so the success response is still checked.
+examples_only:
+  reason: Every valid search makes two LLM calls (query rewrite and expansion).
+  operations:
+    - search
 
 # Resources that a successful test case creates; the test deletes them at the end.
 # `{id}` is the value at `id_pointer` in the response; other `{...}` are value keys.

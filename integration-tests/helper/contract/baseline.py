@@ -20,8 +20,19 @@ FORMAT_VERSION = 1
 _KEY_FIELDS = ("operation", "check", "subject", "detail")
 
 
+class BaselineError(ValueError):
+    """The baseline file cannot be used as it is."""
+
+
 def _entry_key(entry: dict[str, Any]) -> FindingKey:
-    return FindingKey(entry["operation"], entry["check"], entry["subject"], entry.get("detail", ""))
+    try:
+        return FindingKey(
+            entry["operation"], entry["check"], entry["subject"], entry.get("detail", "")
+        )
+    except (KeyError, TypeError) as exc:
+        raise BaselineError(
+            f"a baseline entry needs operation, check and subject: {entry!r}"
+        ) from exc
 
 
 def _read_entries(path: Path) -> list[dict[str, Any]]:
@@ -30,26 +41,45 @@ def _read_entries(path: Path) -> list[dict[str, Any]]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     version = raw.get("format_version")
     if version != FORMAT_VERSION:
-        raise ValueError(f"{path}: unsupported baseline format version {version!r}")
+        raise BaselineError(f"{path}: unsupported baseline format version {version!r}")
     return list(raw.get("findings") or [])
 
 
-def load_baseline(path: Path) -> set[FindingKey]:
-    return {_entry_key(entry) for entry in _read_entries(path)}
+def load_baseline(path: Path, operation_ids: set[str]) -> set[FindingKey]:
+    """The accepted differences. `operation_ids` are the operations of the suite.
+
+    An entry for an operation the suite does not have can never be found again
+    or go stale, so it would stay in the file for ever. It is an error instead.
+    """
+    baseline = {_entry_key(entry) for entry in _read_entries(path)}
+    unknown = sorted({key.operation_id for key in baseline} - operation_ids)
+    if unknown:
+        raise BaselineError(
+            f"{path} has entries for operations that are not in the suite: {', '.join(unknown)}"
+        )
+    return baseline
 
 
 def write_baseline(path: Path, results: list[OperationResult]) -> tuple[int, int]:
     """Make the baseline say what the run found. Returns (entries added, entries removed).
 
-    An entry for an operation that the run did not send is kept as it is, and
-    so is anything a person added to an entry (a note, a ticket).
+    An entry is removed only if its operation ran to the end and the difference
+    did not show. Entries of operations that were not sent, or not finished,
+    stay as they are, and so does anything a person added to an entry (a note,
+    a ticket).
     """
     existing = {_entry_key(entry): entry for entry in _read_entries(path)}
-    ran = {result.run.operation_id for result in results if result.run.is_sent and result.cases}
+    ran_to_the_end = {
+        result.run.operation_id
+        for result in results
+        if result.run.is_sent and result.cases and not result.unfinished
+    }
     found = {key for result in results for key in result.findings}
 
     kept = {
-        key: entry for key, entry in existing.items() if key in found or key.operation_id not in ran
+        key: entry
+        for key, entry in existing.items()
+        if key in found or key.operation_id not in ran_to_the_end
     }
     added = found - set(existing)
     entries = [

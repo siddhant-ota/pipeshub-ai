@@ -40,6 +40,8 @@ REPORTS_DIR = Path(
 
 # 0: every check passed. 1: some failed. Anything else: Schemathesis could not run.
 _COMPLETED_EXIT_CODES = (0, 1)
+# `stop_reason` of a run in which every selected operation went through every phase.
+_RAN_TO_THE_END = "completed"
 _PLACEHOLDER = "0" * 24
 
 
@@ -157,8 +159,6 @@ def _run_schemathesis(suite: Suite, files: RunFiles, *, api_url: str, env: dict[
         str(files.har),
         "--no-color",
     ]
-    for stale in (files.events, files.summary, files.har):
-        stale.unlink(missing_ok=True)
     with open(files.log, "w", encoding="utf-8") as log:
         code = subprocess.run(
             command,
@@ -171,11 +171,21 @@ def _run_schemathesis(suite: Suite, files: RunFiles, *, api_url: str, env: dict[
     if code not in _COMPLETED_EXIT_CODES:
         tail = "\n".join(files.log.read_text(encoding="utf-8").splitlines()[-30:])
         raise RunnerError(f"Schemathesis exited with code {code}. Log: {files.log}\n{tail}")
-    summary = json.loads(files.summary.read_text(encoding="utf-8"))
-    if not summary.get("complete"):
+    # `complete` in the summary only says that the engine exited by itself. It is also true when
+    # the engine gave up, for example because the API stopped answering.
+    stop_reason = json.loads(files.summary.read_text(encoding="utf-8")).get("stop_reason")
+    if stop_reason != _RAN_TO_THE_END:
         raise RunnerError(
-            f"Schemathesis stopped early ({summary.get('stop_reason')}). Log: {files.log}"
+            f"Schemathesis stopped early ({stop_reason}), so its results are not complete. "
+            f"Log: {files.log}"
         )
+
+
+def _discard_previous_run(files: RunFiles) -> None:
+    """Remove the results of the last run first, so that a run that fails to start cannot be
+    judged, or cleaned up after, with them."""
+    for stale in (files.manifest, files.events, files.summary, files.har):
+        stale.unlink(missing_ok=True)
 
 
 def _prepare(
@@ -198,6 +208,7 @@ def execute(
 ) -> ContractRun:
     """Send the suite's test cases to the deployment at `base_url` and judge the answers."""
     files = run_files(suite)
+    _discard_previous_run(files)
     runs, config = _prepare(suite, values, files, selected)
     meta = _meta(suite, f"{base_url}{API_PREFIX}", config)
     files.manifest.write_text(
@@ -221,7 +232,8 @@ def judge(suite: Suite, baseline_path: Path | None = None) -> ContractRun:
         raise RunnerError(f"No run of suite {suite.name!r} found in {files.directory}.")
     saved = json.loads(files.manifest.read_text(encoding="utf-8"))
     runs = [OperationRun.from_dict(entry) for entry in saved["runs"]]
-    baseline = load_baseline(baseline_path) if baseline_path else set()
+    operation_ids = {planned.operation.operation_id for planned in suite.operations}
+    baseline = load_baseline(baseline_path, operation_ids) if baseline_path else set()
     results = collect(runs, files.events, baseline)
     write_report(results, saved["meta"], files.directory)
     return ContractRun(suite, files, saved["meta"], tuple(results))
@@ -234,6 +246,7 @@ def plan(suite: Suite, selected: set[str] | None = None) -> Path:
     every response check would fail and say nothing.
     """
     files = run_files(suite, "plan")
+    _discard_previous_run(files)
     values = ContractValues(values=dict.fromkeys(suite.value_keys, _PLACEHOLDER))
     runs, config = _prepare(suite, values, files, selected)
     config.pop("rate-limit", None)

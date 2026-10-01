@@ -76,6 +76,19 @@ class Case:
         return f"{where}: {description}" if where else description
 
 
+@dataclass(frozen=True)
+class Scenario:
+    label: str
+    # Schemathesis' own word: success, failure, error, interrupted or skip.
+    status: str
+    cases: tuple[Case, ...]
+
+    @property
+    def completed(self) -> bool:
+        """False if Schemathesis could not finish it, for example the API stopped answering."""
+        return self.status not in ("error", "interrupted")
+
+
 def _json(encoded: str) -> Any:
     if not encoded:
         return None
@@ -111,36 +124,49 @@ def _checks(raw: list[dict[str, Any]] | None) -> tuple[Check, ...]:
     return tuple(checks)
 
 
-def read_cases(ndjson_path: Path) -> Iterator[Case]:
+def _cases(scenario: dict[str, Any]) -> Iterator[Case]:
+    recorder = scenario.get("recorder") or {}
+    interactions = recorder.get("interactions") or {}
+    checks = recorder.get("checks") or {}
+    for case_id, entry in (recorder.get("cases") or {}).items():
+        value = entry.get("value") or {}
+        meta = value.get("meta") or {}
+        data = (meta.get("phase") or {}).get("data") or {}
+        interaction = interactions.get(case_id) or {}
+        request = interaction.get("request") or {}
+        response = interaction.get("response") or {}
+        yield Case(
+            case_id=case_id,
+            label=recorder.get("label", ""),
+            phase=scenario.get("phase", ""),
+            mode=(meta.get("generation") or {}).get("mode") or "",
+            location=data.get("parameter_location") or "",
+            parameter=data.get("parameter") or "",
+            schema_pointer=data.get("location") or "",
+            scenario=data.get("scenario") or "",
+            description=data.get("description") or "",
+            method=value.get("method", ""),
+            target=_target(request.get("uri", "")),
+            status=response.get("status_code"),
+            checks=_checks(checks.get(case_id)),
+            request_base64=_base64(request, "body"),
+            response_base64=_base64(response, "content"),
+        )
+
+
+def read_scenarios(ndjson_path: Path) -> Iterator[Scenario]:
+    """Every scenario of a run: one operation in one phase, with the cases it sent."""
     with open(ndjson_path, encoding="utf-8") as handle:
         for line in handle:
             scenario = json.loads(line).get("ScenarioFinished")
-            if not scenario:
-                continue
-            recorder = scenario.get("recorder") or {}
-            interactions = recorder.get("interactions") or {}
-            checks = recorder.get("checks") or {}
-            for case_id, entry in (recorder.get("cases") or {}).items():
-                value = entry.get("value") or {}
-                meta = value.get("meta") or {}
-                data = (meta.get("phase") or {}).get("data") or {}
-                interaction = interactions.get(case_id) or {}
-                request = interaction.get("request") or {}
-                response = interaction.get("response") or {}
-                yield Case(
-                    case_id=case_id,
-                    label=recorder.get("label", ""),
-                    phase=scenario.get("phase", ""),
-                    mode=(meta.get("generation") or {}).get("mode") or "",
-                    location=data.get("parameter_location") or "",
-                    parameter=data.get("parameter") or "",
-                    schema_pointer=data.get("location") or "",
-                    scenario=data.get("scenario") or "",
-                    description=data.get("description") or "",
-                    method=value.get("method", ""),
-                    target=_target(request.get("uri", "")),
-                    status=response.get("status_code"),
-                    checks=_checks(checks.get(case_id)),
-                    request_base64=_base64(request, "body"),
-                    response_base64=_base64(response, "content"),
+            if scenario:
+                yield Scenario(
+                    label=(scenario.get("recorder") or {}).get("label", ""),
+                    status=scenario.get("status", ""),
+                    cases=tuple(_cases(scenario)),
                 )
+
+
+def read_cases(ndjson_path: Path) -> Iterator[Case]:
+    for scenario in read_scenarios(ndjson_path):
+        yield from scenario.cases

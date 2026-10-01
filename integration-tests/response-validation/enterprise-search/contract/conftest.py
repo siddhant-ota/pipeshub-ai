@@ -24,6 +24,7 @@ from helper.clients.conversations_client import (
 )
 from helper.clients.projects_client import ProjectsClient
 from helper.clients.search_client import SearchClient
+from helper.contract.baseline import BaselineError
 from helper.contract.created import created_resource_paths
 from helper.contract.events import API_PREFIX
 from helper.contract.report import summary_lines
@@ -36,7 +37,7 @@ logger = logging.getLogger("enterprise-search-contract")
 
 SUITE_PATH = Path(__file__).with_name("suite.yaml")
 BASELINE_PATH = Path(__file__).with_name("baseline.json")
-TEST_FILE = "integration_test_contract.py"
+TEST_PATH = Path(__file__).with_name("integration_test_contract.py")
 
 # One resource per role, so that an update, an archive or a delete under test
 # cannot change what another operation reads, in whatever order they run.
@@ -74,25 +75,31 @@ def _conversation_ids(resp: requests.Response, what: str) -> dict[str, str]:
 
 
 def _delete_quietly(what: str, delete: Callable[[], requests.Response]) -> None:
+    """Delete one thing. A failure is logged and must not stop the deletes after it."""
     try:
         resp = delete()
-    except requests.RequestException as exc:
+    except Exception as exc:  # noqa: BLE001 - for example a token that cannot be renewed
         logger.warning("Could not delete %s: %s", what, exc)
         return
-    # 404: the DELETE operation under test already removed it.
+    # 404: the operation under test already removed it.
     if resp.status_code >= 400 and resp.status_code != 404:
         logger.warning("Could not delete %s: HTTP %s %s", what, resp.status_code, resp.text[:200])
 
 
+def _seed(role: str) -> str:
+    return seed_query(f"contract-{role}-{uuid4().hex[:8]}")
+
+
 @pytest.fixture(scope="session")
 def contract_conversations(
-    conversations_client: ConversationsClient,
+    conversations_client: ConversationsClient, ai_models_configured: Any
 ) -> Iterator[dict[str, dict[str, str]]]:
+    del ai_models_configured  # a conversation needs an LLM
     created: dict[str, dict[str, str]] = {}
     try:
         for role in CONVERSATION_ROLES:
             resp = conversations_client.create_conversation(
-                query=seed_query(f"contract-{role}-{uuid4().hex[:8]}"), timeout=_LLM_TIMEOUT_SEC
+                query=_seed(role), timeout=_LLM_TIMEOUT_SEC
             )
             created[role] = _conversation_ids(resp, f"Create conversation ({role})")
         _body(
@@ -147,9 +154,7 @@ def contract_agent_conversations(
     try:
         for role in CONVERSATION_ROLES:
             resp = agent_conversations_client.create_conversation(
-                agent_key,
-                query=seed_query(f"contract-agent-{role}-{uuid4().hex[:8]}"),
-                timeout=_LLM_TIMEOUT_SEC,
+                agent_key, query=_seed(f"agent-{role}"), timeout=_LLM_TIMEOUT_SEC
             )
             created[role] = _conversation_ids(resp, f"Create agent conversation ({role})")
         _body(
@@ -164,6 +169,72 @@ def contract_agent_conversations(
                 f"agent conversation ({role})",
                 lambda ids=ids: agent_conversations_client.delete_conversation(
                     agent_key, ids["id"]
+                ),
+            )
+
+
+@pytest.fixture(scope="session")
+def contract_project(projects_client: ProjectsClient) -> Iterator[str]:
+    resp = projects_client.create_project(name=f"contract-{uuid4().hex[:8]}")
+    project = _body(resp, (201,), "Create project").get("project") or {}
+    assert project.get("_id"), "Create project: response has no project._id"
+    try:
+        yield str(project["_id"])
+    finally:
+        _delete_quietly("project", lambda: projects_client.delete_project(project["_id"]))
+
+
+@pytest.fixture(scope="session")
+def contract_linked_conversations(
+    conversations_client: ConversationsClient,
+    agent_conversations_client: AgentConversationsClient,
+    agent_session: Any,
+    contract_project: str,
+    ai_models_configured: Any,
+) -> Iterator[dict[str, str]]:
+    """A conversation and an agent conversation that are already in a project.
+
+    The project-visibility operations answer 400 for a conversation that is in
+    no project, so they get their own, linked here and not by another operation.
+    """
+    del ai_models_configured
+    agent_key = agent_session["workhorse_agent"]
+    created: dict[str, str] = {}
+    try:
+        resp = conversations_client.create_conversation(
+            query=_seed("linked"), timeout=_LLM_TIMEOUT_SEC
+        )
+        created["conversation"] = _conversation_ids(resp, "Create conversation (linked)")["id"]
+        _body(
+            conversations_client.set_project(created["conversation"], contract_project),
+            (200,),
+            "Link conversation to project",
+        )
+        resp = agent_conversations_client.create_conversation(
+            agent_key, query=_seed("agent-linked"), timeout=_LLM_TIMEOUT_SEC
+        )
+        created["agentConversation"] = _conversation_ids(
+            resp, "Create agent conversation (linked)"
+        )["id"]
+        _body(
+            agent_conversations_client.set_project(
+                agent_key, created["agentConversation"], contract_project
+            ),
+            (200,),
+            "Link agent conversation to project",
+        )
+        yield created
+    finally:
+        if "conversation" in created:
+            _delete_quietly(
+                "conversation (linked)",
+                lambda: conversations_client.delete_conversation(created["conversation"]),
+            )
+        if "agentConversation" in created:
+            _delete_quietly(
+                "agent conversation (linked)",
+                lambda: agent_conversations_client.delete_conversation(
+                    agent_key, created["agentConversation"]
                 ),
             )
 
@@ -184,6 +255,12 @@ def contract_searches(search_client: SearchClient, session_kb: Any) -> Iterator[
         yield created
     finally:
         for role, search_id in created.items():
+            # DELETE /search/{id} finds only a search that is not archived, and the archive
+            # operation under test archives one more. Unarchiving one that is not archived is a 404.
+            _delete_quietly(
+                f"search ({role}), unarchive",
+                lambda search_id=search_id: search_client.unarchive_search(search_id),
+            )
             _delete_quietly(
                 f"search ({role})",
                 lambda search_id=search_id: search_client.delete_search(search_id),
@@ -191,14 +268,14 @@ def contract_searches(search_client: SearchClient, session_kb: Any) -> Iterator[
 
 
 @pytest.fixture(scope="session")
-def contract_project(projects_client: ProjectsClient) -> Iterator[str]:
-    resp = projects_client.create_project(name=f"contract-{uuid4().hex[:8]}")
-    project = _body(resp, (201,), "Create project").get("project") or {}
-    assert project.get("_id"), "Create project: response has no project._id"
-    try:
-        yield str(project["_id"])
-    finally:
-        _delete_quietly("project", lambda: projects_client.delete_project(project["_id"]))
+def contract_well_formed_record_id() -> str:
+    """`recordIds` must be 24-hex ObjectIds, and the IDs of indexed records are UUIDs.
+
+    There is no real value to give, so this one is only well formed. It keeps
+    `recordIds` from being the reason the API rejects an invalid request, which
+    would hide whether it rejects the part that the request made invalid.
+    """
+    return "0" * 24
 
 
 @dataclass(frozen=True)
@@ -249,12 +326,22 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
     _readonly("readonly_agent_conversation", "agentConversation"),
     _by_role("contract_agent_conversations", "agentConversation", CONVERSATION_ROLES),
     ValueSource(
+        "contract_linked_conversations",
+        ("conversation.linked.id", "agentConversation.linked.id"),
+        lambda linked: (linked["conversation"], linked["agentConversation"]),
+    ),
+    ValueSource(
         "contract_searches",
         tuple(f"search.{role}.id" for role in SEARCH_ROLES),
         lambda searches: tuple(searches[role] for role in SEARCH_ROLES),
     ),
     ValueSource("contract_project", ("project.id",), lambda project_id: (project_id,)),
     ValueSource("second_user", ("user.second.id",), lambda user: (user.user_id,)),
+    ValueSource(
+        "contract_well_formed_record_id",
+        ("record.wellFormedId",),
+        lambda record_id: (record_id,),
+    ),
 )
 
 
@@ -280,11 +367,11 @@ def contract_values(request: pytest.FixtureRequest) -> ContractValues:
 
 
 def _selected_operations(session: pytest.Session) -> set[str]:
-    """The operations whose tests this session runs, so that `-k` also limits what is sent."""
+    """The operations whose tests this session runs, so that selecting tests limits what is sent."""
     return {
         item.callspec.params["operation_id"]
         for item in session.items
-        if item.path.name == TEST_FILE and hasattr(item, "callspec")
+        if item.path == TEST_PATH and hasattr(item, "callspec")
     }
 
 
@@ -305,6 +392,7 @@ def contract_run(
         )
     finally:
         # What the test cases themselves created, for example agents from `createAgent`.
+        # `execute` removes the events of the run before, so these are from this run only.
         for path in created_resource_paths(suite, contract_values, run_files(suite).events):
             if "{" in path:
                 logger.warning("Not deleted, a value in its path is missing: %s", path)
@@ -315,9 +403,15 @@ def contract_run(
 
 
 def pytest_terminal_summary(terminalreporter: Any) -> None:
-    """Say what the run covered: a run with no failure can still have gaps by design."""
+    """Say what the run covered: a run with no failure can still have gaps by design.
+
+    Under pytest-xdist the controller does not load this file, so there is no
+    summary; the report file has the same content.
+    """
     ran = any(
-        TEST_FILE in getattr(report, "nodeid", "") and getattr(report, "when", "") == "call"
+        getattr(report, "when", "") == "call"
+        and getattr(report, "fspath", "")
+        and (terminalreporter.config.rootpath / report.fspath) == TEST_PATH
         for reports in terminalreporter.stats.values()
         for report in reports
     )
@@ -325,7 +419,7 @@ def pytest_terminal_summary(terminalreporter: Any) -> None:
         return
     try:
         run = judge(load_suite(SUITE_PATH), BASELINE_PATH)
-    except RunnerError:
+    except (RunnerError, BaselineError):
         return
     terminalreporter.section("API contract: enterprise search")
     for line in summary_lines(list(run.results)):

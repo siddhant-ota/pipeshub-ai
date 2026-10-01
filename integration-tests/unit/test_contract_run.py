@@ -7,7 +7,9 @@ which is everything the contract tests read from it.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from contract_samples import SPEC, case_event, write_events, write_suite
@@ -15,6 +17,7 @@ from contract_samples import SPEC, case_event, write_events, write_suite
 from helper.contract import runner
 from helper.contract.config import (
     STATE_DESELECTED,
+    STATE_EXAMPLES_ONLY,
     STATE_FULL,
     STATE_NEGATIVE_ONLY,
     STATE_SKIPPED,
@@ -39,6 +42,7 @@ PLANNED = {
     "GET /search": "searchHistory",
     "GET /conversations": "getAllConversations",
     "POST /conversations/create": "createConversation",
+    "PUT /conversations/{conversationId}/project": "setConversationProject",
 }
 ALL_VALUES = ContractValues(
     values={"thing.id": "T1", "project.id": "P1", "kb.id": "K1", "llm.key": "M1"}
@@ -124,6 +128,68 @@ def test_config_carries_path_values_and_switches_operations_off(suite: Suite) ->
     assert "not_a_server_error" not in config["checks"]
 
 
+def test_config_of_an_examples_only_operation(tmp_path: Path) -> None:
+    suite = load_suite(
+        write_suite(tmp_path, examples_only={"reason": "Slow.", "operations": ["listThings"]}),
+        SPEC,
+    )
+    runs = plan_run(suite, ALL_VALUES)
+    by_id = {run.operation_id: run for run in runs}
+
+    assert by_id["listThings"].state == STATE_EXAMPLES_ONLY
+    assert by_id["listThings"].is_sent
+    blocks = {
+        block["include-operation-id"]: block
+        for block in build_config(suite, ALL_VALUES, runs)["operations"]
+    }
+    # Invalid requests from the coverage phase; the examples phase is left on, unlike negative-only.
+    assert blocks["listThings"] == {
+        "include-operation-id": "listThings",
+        "generation": {"mode": "negative"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "raises"),
+    [("completed", False), ("server_unavailable", True), ("interrupted", True), (None, True)],
+)
+def test_a_run_that_stopped_early_is_not_judged(
+    suite: Suite,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop_reason: str | None,
+    raises: bool,
+) -> None:
+    """Schemathesis reports `complete: true` even when it gave up, so the stop reason decides."""
+    files = runner.RunFiles(tmp_path)
+
+    def schemathesis_stub(command: list[str], **kwargs: object) -> SimpleNamespace:
+        files.summary.write_text(json.dumps({"complete": True, "stop_reason": stop_reason}))
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(runner, "_schemathesis_command", lambda: "schemathesis")
+    monkeypatch.setattr(runner.subprocess, "run", schemathesis_stub)
+
+    if raises:
+        with pytest.raises(runner.RunnerError, match="stopped early"):
+            runner._run_schemathesis(suite, files, api_url="http://stub", env={})
+    else:
+        runner._run_schemathesis(suite, files, api_url="http://stub", env={})
+
+
+def test_a_new_run_discards_the_results_of_the_one_before(tmp_path: Path) -> None:
+    """Otherwise a run that fails to start would be judged, and cleaned up, with old results."""
+    files = runner.RunFiles(tmp_path)
+    for path in (files.manifest, files.events, files.summary, files.har):
+        path.write_text("old")
+
+    runner._discard_previous_run(files)
+
+    assert not any(
+        path.exists() for path in (files.manifest, files.events, files.summary, files.har)
+    )
+
+
 def test_substitutions_cover_the_operations_that_are_sent(suite: Suite) -> None:
     runs = plan_run(suite, ALL_VALUES, selected={"createThing"})
 
@@ -197,6 +263,17 @@ def test_a_negative_only_operation_sends_no_valid_request(planned_cases: dict[st
     assert all(case.is_negative for case in planned_cases["POST /conversations/create"])
 
 
+def test_an_examples_only_operation_sends_the_spec_examples_as_its_valid_requests(
+    planned_cases: dict[str, list],
+) -> None:
+    """`POST /search` is `examples_only` in the suite: a valid search calls the LLM twice."""
+    valid = [case for case in planned_cases["POST /search"] if not case.is_negative]
+    invalid = [case for case in planned_cases["POST /search"] if case.is_negative]
+
+    assert valid and {case.phase for case in valid} == {"examples"}
+    assert len(invalid) > len(valid)
+
+
 def test_no_case_uses_a_method_the_spec_does_not_list(planned_cases: dict[str, list]) -> None:
     for label, cases in planned_cases.items():
         assert {case.method for case in cases} == {label.split(" ", 1)[0]}
@@ -204,16 +281,23 @@ def test_no_case_uses_a_method_the_spec_does_not_list(planned_cases: dict[str, l
 
 def test_real_values_reach_the_request(planned_cases: dict[str, list]) -> None:
     placeholder = "0" * 24
-    with_kb = [case for case in planned_cases["POST /search"] if '"kb": ["' in case.request_body]
+    in_body = [
+        case
+        for case in planned_cases["PUT /conversations/{conversationId}/project"]
+        if '"projectId": "' in case.request_body
+    ]
     with_project = [
         case for case in planned_cases["GET /conversations"] if "projectId=" in case.target
     ]
 
-    assert with_kb and with_project
+    assert in_body and with_project
     # A valid request always carries the real ID. So does an invalid one whose
     # invalid part is elsewhere: the ID must not be a second reason to reject it.
+    assert any(not case.is_negative for case in in_body)
     assert all(
-        f'"kb": ["{placeholder}"' in case.request_body for case in with_kb if not case.is_negative
+        f'"projectId": "{placeholder}"' in case.request_body
+        for case in in_body
+        if not case.is_negative
     )
     assert all(
         f"projectId={placeholder}" in case.target for case in with_project if not case.is_negative

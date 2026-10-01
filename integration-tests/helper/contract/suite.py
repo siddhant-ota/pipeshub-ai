@@ -13,12 +13,22 @@ from typing import Any
 
 import yaml
 
-from helper.contract.fields import request_fields
+from helper.contract.fields import ANY_KEY, request_fields
 from helper.contract.spec import Operation, load_spec, operations_in_scope
 
+# Valid and invalid requests.
 PROFILE_FULL = "full"
+# Invalid requests, and of the valid ones only the examples that the spec gives.
+PROFILE_EXAMPLES_ONLY = "examples_only"
+# Invalid requests only.
 PROFILE_NEGATIVE_ONLY = "negative_only"
 PROFILE_SKIP = "skip"
+
+# Suite keys that give an operation a profile other than "full".
+_REDUCED_PROFILES = (PROFILE_NEGATIVE_ONLY, PROFILE_EXAMPLES_ONLY)
+# Suite keys that say an ID field keeps the value Schemathesis generates.
+_CLIENT_CHOSEN = "client_chosen_ids"
+_WITHOUT_FIXTURE = "ids_without_fixture"
 
 
 class SuiteError(Exception):
@@ -37,8 +47,8 @@ class PlannedOperation:
     path_values: dict[str, str] = field(default_factory=dict)
     # request field (`body.filters.kb[*]`) -> value key
     field_values: dict[str, str] = field(default_factory=dict)
-    # ID fields of this operation that keep a generated value
-    waived_fields: tuple[str, ...] = ()
+    # Fields that must name something that exists, and for which no fixture gives a value.
+    fixtureless_fields: tuple[str, ...] = ()
 
     @property
     def value_keys(self) -> set[str]:
@@ -83,15 +93,22 @@ def _path_values(operation: Operation, rules: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _unknown_operations(raw: dict[str, Any], known: set[str]) -> list[str]:
-    referenced = {
-        *(entry["operation"] for entry in raw.get("skip") or []),
-        *(entry["operation"] for entry in raw.get("no_success_response") or []),
-        *(entry["operation"] for entry in raw.get("created_resources") or []),
-        *((raw.get("negative_only") or {}).get("operations") or []),
-        *((raw.get("path_parameters") or {}).get("operations") or {}),
-    }
-    return sorted(referenced - known)
+def _profiles(raw: dict[str, Any], problems: list[str]) -> dict[str, tuple[str, str]]:
+    """operationId -> (profile, reason) for every operation that is not run in full."""
+    profiles: dict[str, tuple[str, str]] = {}
+    for entry in raw.get("skip") or []:
+        profiles[entry["operation"]] = (PROFILE_SKIP, entry["reason"])
+    for profile in _REDUCED_PROFILES:
+        section = raw.get(profile) or {}
+        for operation_id in section.get("operations") or []:
+            if operation_id in profiles:
+                problems.append(f"{operation_id} is in `{profile}` and in another list")
+            profiles[operation_id] = (profile, section.get("reason", ""))
+    return profiles
+
+
+def _fields_by_name(raw: dict[str, Any], key: str) -> dict[str, str]:
+    return {entry["field"]: entry["reason"] for entry in raw.get(key) or []}
 
 
 def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
@@ -101,18 +118,24 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
     by_id = {operation.operation_id: operation for operation in in_scope}
     problems: list[str] = []
 
-    unknown = _unknown_operations(raw, set(by_id))
-    if unknown:
-        problems.append(f"operations that are not in scope of the spec: {', '.join(unknown)}")
-
-    skip = {entry["operation"]: entry["reason"] for entry in raw.get("skip") or []}
+    profiles = _profiles(raw, problems)
     no_success = {
         entry["operation"]: entry["reason"] for entry in raw.get("no_success_response") or []
     }
-    negative_only = raw.get("negative_only") or {}
-    negative_ids = set(negative_only.get("operations") or [])
     values: dict[str, str] = raw.get("values") or {}
-    waived = {entry["field"]: entry["reason"] for entry in raw.get("waived_id_fields") or []}
+    client_chosen = _fields_by_name(raw, _CLIENT_CHOSEN)
+    without_fixture = _fields_by_name(raw, _WITHOUT_FIXTURE)
+    decided = {*values, *client_chosen, *without_fixture}
+
+    referenced = {
+        *profiles,
+        *no_success,
+        *((raw.get("path_parameters") or {}).get("operations") or {}),
+        *(entry["operation"] for entry in raw.get("created_resources") or []),
+    }
+    unknown = sorted(referenced - set(by_id))
+    if unknown:
+        problems.append(f"operations that are not in scope of the spec: {', '.join(unknown)}")
 
     seen_fields: set[str] = set()
     planned: list[PlannedOperation] = []
@@ -120,8 +143,9 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
         operation_id = operation.operation_id
         fields = request_fields(spec, operation)
         seen_fields.update(request_field.name for request_field in fields)
-        if operation_id in skip:
-            planned.append(PlannedOperation(operation, PROFILE_SKIP, skip[operation_id]))
+        profile, reason = profiles.get(operation_id, (PROFILE_FULL, ""))
+        if profile == PROFILE_SKIP:
+            planned.append(PlannedOperation(operation, PROFILE_SKIP, reason))
             continue
 
         path_values = _path_values(operation, raw.get("path_parameters") or {})
@@ -134,22 +158,19 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
         undecided = sorted(
             request_field.name
             for request_field in fields
-            if request_field.is_id
-            and request_field.name not in values
-            and request_field.name not in waived
+            if request_field.is_id and request_field.name not in decided
         )
         if undecided:
             problems.append(
-                f"{operation_id} ({operation.label}): ID field(s) with no entry in `values` "
-                f"or `waived_id_fields`: {', '.join(undecided)}"
+                f"{operation_id} ({operation.label}): ID field(s) with no entry in `values`, "
+                f"`{_CLIENT_CHOSEN}` or `{_WITHOUT_FIXTURE}`: {', '.join(undecided)}"
             )
 
-        is_negative_only = operation_id in negative_ids
         planned.append(
             PlannedOperation(
                 operation=operation,
-                profile=PROFILE_NEGATIVE_ONLY if is_negative_only else PROFILE_FULL,
-                reason=negative_only.get("reason", "") if is_negative_only else "",
+                profile=profile,
+                reason=reason,
                 no_success_reason=no_success.get(operation_id, ""),
                 path_values=path_values,
                 field_values={
@@ -157,20 +178,29 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
                     for request_field in fields
                     if request_field.name in values
                 },
-                waived_fields=tuple(
-                    request_field.name for request_field in fields if request_field.name in waived
+                fixtureless_fields=tuple(
+                    request_field.name
+                    for request_field in fields
+                    if request_field.name in without_fixture
                 ),
             )
         )
 
-    stale = sorted((set(values) | set(waived)) - seen_fields)
+    stale = sorted(decided - seen_fields)
     if stale:
+        problems.append(f"fields that no operation has: {', '.join(stale)}")
+    for first, second in (
+        (set(values), {*client_chosen, *without_fixture}),
+        (set(client_chosen), set(without_fixture)),
+    ):
+        if first & second:
+            problems.append(f"fields in more than one list: {', '.join(sorted(first & second))}")
+    free_form = sorted(name for name in values if ANY_KEY in name)
+    if free_form:
         problems.append(
-            f"`values` or `waived_id_fields` name fields that no operation has: {', '.join(stale)}"
+            "`values` cannot set a field under a free-form key; list it under "
+            f"`{_WITHOUT_FIXTURE}` instead: {', '.join(free_form)}"
         )
-    both = sorted(set(values) & set(waived))
-    if both:
-        problems.append(f"fields in both `values` and `waived_id_fields`: {', '.join(both)}")
 
     if problems:
         raise SuiteError(f"{path} does not agree with the spec:\n- " + "\n- ".join(problems))

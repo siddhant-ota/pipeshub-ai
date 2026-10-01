@@ -91,8 +91,15 @@ def _mutation(case: schemathesis.Case, location: str) -> Mutation | None:
 
 @schemathesis.hook
 def before_call(ctx: schemathesis.HookContext, case: schemathesis.Case, **kwargs: Any) -> None:
-    for substitution in _SUBSTITUTIONS.get(case.operation.label, ()):
-        if is_under_test(substitution, _mutation(case, substitution.location)):
+    substitutions = _SUBSTITUTIONS.get(case.operation.label, ())
+    # Read before anything is replaced: Schemathesis looks at a changed request again, and may
+    # then describe it differently.
+    mutations = {
+        substitution.location: _mutation(case, substitution.location)
+        for substitution in substitutions
+    }
+    for substitution in substitutions:
+        if is_under_test(substitution, mutations[substitution.location]):
             continue
         attribute = "body" if substitution.location == BODY else "query"
         replaced, count = substitute(getattr(case, attribute), substitution)

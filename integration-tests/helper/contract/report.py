@@ -8,11 +8,17 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from helper.contract.config import STATE_FULL, STATE_NEGATIVE_ONLY, OperationRun
+from helper.contract.config import (
+    STATE_EXAMPLES_ONLY,
+    STATE_FULL,
+    STATE_NEGATIVE_ONLY,
+    OperationRun,
+)
 from helper.contract.events import read_cases
 from helper.contract.results import (
     RESPONSE_SCHEMA,
     VERDICT_DESELECTED,
+    VERDICT_INCOMPLETE,
     VERDICT_KNOWN_MISMATCH,
     VERDICT_MATCH,
     VERDICT_MISMATCH,
@@ -20,6 +26,7 @@ from helper.contract.results import (
     VERDICT_PARTIAL,
     VERDICT_SKIPPED,
     VERDICT_STALE_BASELINE,
+    VERDICT_STALE_SUITE,
     VERDICT_UNVERIFIED,
     Finding,
     OperationResult,
@@ -34,8 +41,19 @@ _VERDICT_TEXT = {
         "Stale baseline",
         "The baseline lists a difference that no longer occurs",
     ),
+    VERDICT_STALE_SUITE: (
+        "Stale suite entry",
+        "The suite file says no request can succeed, and one did",
+    ),
+    VERDICT_INCOMPLETE: (
+        "Incomplete",
+        "A request got no response, or Schemathesis could not finish the operation",
+    ),
     VERDICT_NOT_RUN: ("Not run", "No request was sent: a value the operation needs is missing"),
-    VERDICT_UNVERIFIED: ("Unverified", "No difference, but no 2xx response was checked"),
+    VERDICT_UNVERIFIED: (
+        "Unverified",
+        "No difference, but the responses that would show one never came",
+    ),
     VERDICT_KNOWN_MISMATCH: (
         "Known difference",
         "Differences found; the baseline lists all of them",
@@ -48,7 +66,11 @@ _VERDICT_TEXT = {
     VERDICT_MATCH: ("Matches", "The spec and the API agree, and a success response was checked"),
 }
 _VERDICT_ORDER = tuple(_VERDICT_TEXT)
-_STATE_TEXT = {STATE_FULL: "full", STATE_NEGATIVE_ONLY: "invalid requests only"}
+_STATE_TEXT = {
+    STATE_FULL: "full",
+    STATE_EXAMPLES_ONLY: "invalid requests, and the valid examples of the spec",
+    STATE_NEGATIVE_ONLY: "invalid requests only",
+}
 _MESSAGE_LINES = 12
 _EXAMPLE_CHARS = 300
 
@@ -240,7 +262,7 @@ def render_report(results: list[OperationResult], meta: dict[str, Any]) -> str:
     if unjudged:
         lines += [
             f"- {unjudged}: the API rejected a valid request that had a generated value in an ID field "
-            + "the suite waives (`waived_id_fields`). The request named something that does not exist, "
+            + "that has no fixture (`ids_without_fixture`). The request named something that does not exist, "
             + "so the rejection says nothing about the spec. A fixture for that field would close the gap.",
         ]
     if ignored or unjudged:
