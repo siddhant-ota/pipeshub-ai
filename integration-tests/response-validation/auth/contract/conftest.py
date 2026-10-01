@@ -162,7 +162,9 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         lambda state: (state,),
         "The SAML sign-in configuration. Where the deployment has none, the fixture writes one "
         "(a placeholder identity provider under `.invalid`). The API cannot remove a SAML "
-        "configuration, so the placeholder stays on the deployment after the run.",
+        "configuration, so the placeholder stays on the deployment after the run. It also "
+        "stays if the API answers 500 because it cannot use the placeholder certificate: the "
+        "API stores the configuration first.",
     ),
     ValueSource(
         "contract_sign_in_policy",

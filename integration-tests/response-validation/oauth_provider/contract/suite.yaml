@@ -21,12 +21,19 @@ values:
   body.client_secret: oauthApp.clientSecret
   body.redirect_uri: oauthApp.redirectUri
   body.scope: oauthApp.scope
+  # Gaps in the spec that these values hide, in the authorize request and in
+  # the consent: `state` has no `minLength` and `code_challenge` has no
+  # pattern, so Schemathesis sends "" for both. The API wants at least one
+  # character of state, and a challenge of 43 to 128 characters from
+  # `A-Za-z0-9-_` (oauth.validators.ts). Without the values no valid request
+  # passes the validator, and an invalid one is refused for the empty
+  # challenge and not for its invalid part.
+  query.state: authorization.state
+  query.code_challenge: authorization.codeChallenge
+  body.state: authorization.state
+  body.code_challenge: authorization.codeChallenge
 
 values_by_operation:
-  # Gap in the spec that this value hides: `state` has no `minLength`, so
-  # Schemathesis sends "". The API wants at least one character.
-  oauthAuthorizeConsent:
-    body.state: consent.state
   # A token of the app that nothing else uses: the first valid request revokes it.
   oauthRevoke:
     body.token: oauthToken.disposable.accessToken
@@ -40,7 +47,8 @@ constants:
   # A client-credentials token never carries `openid` (the token endpoint drops
   # the identity scopes), so the tokens that the test cases get have no scope.
   oauthApp.scope: openid
-  consent.state: contract-state
+  authorization.state: contract-state
+  authorization.codeChallenge: contract-code-challenge-0123456789abcdefghi
 
 # ID fields whose value the client is free to choose. They keep the generated value.
 client_chosen_ids:
@@ -58,6 +66,13 @@ ids_without_fixture:
     reason: A refresh token works once; the token endpoint replaces it on use.
 
 auth:
+  # Difference between the spec and the API: the spec says that the authorize
+  # request needs no login (`security: []`). Without one, a middleware answers
+  # 302 to every request before the validator sees it, valid or not
+  # (oauth.redirect.middleware.ts:46-54). With the session of the user, as the
+  # frontend calls it, the route validates the request and answers with the
+  # data for the consent page: 200, which the spec does not list. It only reads.
+  oauthAuthorize: session
   # The route takes only an OAuth access token that a user granted with the
   # scope `openid` (oauth.auth.middleware.ts). Neither login of the run is one:
   # not the session of the test user, and not the client-credentials token,

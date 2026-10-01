@@ -10,12 +10,23 @@
 # change a password act on users that a fixture owns. The sign-in policy of the
 # organization is changed, but only to one that allows a password, and a
 # fixture puts it back when this suite is done.
+#
+# The suite takes about 40 minutes: the sign-in limiter sets the pace (see
+# `operation_rate_limits`). Do not run it with a `--timeout` that kills the
+# process before then; the sign-in policy would not be put back. A deployment
+# with MAX_AUTH_REQUESTS_PER_MINUTE below 10 answers 429 at these rates.
 
 name: auth
 
 include_path_regex: "^/(userAccount|orgAuthConfig|saml)(/|$)"
 
 values_by_operation:
+  # One request gets the success, and by design it is not a valid one. The API
+  # accepts the invalid case that has an unknown property next to the password
+  # (`credentials` is `.passthrough()`, userAccount.routes.ts:77-84), and that
+  # case comes before the valid ones. Its success ends the sign-in session, so
+  # every case after it, also the valid one with the password, is answered 401.
+  # The session is one header value for the whole operation.
   authenticate:
     # The organization allows a method only at the step of its sign-in policy,
     # and a password is the one thing a fixture user can prove.
@@ -26,8 +37,20 @@ values_by_operation:
   # this value an accepted policy is always one step that allows `password`.
   # What it hides: no valid request sends another method type (`otp`,
   # `google`, `microsoft`, `azureAd`, `samlSso`, `oauth`).
+  # Three valid cases are answered 400: "one step with two methods", "two
+  # steps" and "three steps". The validator refuses a method that is there
+  # twice and an `order` that is there twice (orgAuthConfig.routes.ts:21-32,
+  # 57-66). Schemathesis repeats one generated item, so these cases had the
+  # same method twice before the pin too; with the pin they always have,
+  # whatever the spec says. In the baseline, these three differences say
+  # nothing about the method types.
   updateAuthMethod:
     body.authMethod[*].allowedMethods[*].type: signIn.method
+  # One request gets the success here too, and it is the invalid case with an
+  # unknown property, which the API drops. After it the password is the new
+  # one, so the two valid cases are answered 401 ("current password is
+  # incorrect"). One user has one current password; nothing can give each
+  # request its own.
   resetPassword:
     body.currentPassword: user.mutable.password
     # Gap in the spec that this value hides: `newPassword` has no `minLength`
@@ -40,6 +63,15 @@ values_by_operation:
     body.email: email.withoutAccount
   forgotPassword:
     body.email: email.withoutAccount
+  # The route has no validator. With a code, a provider and a redirect URI that
+  # are not empty, the controller sends the code and the client secret of the
+  # configured OAuth sign-in to its token endpoint. An empty `code` or
+  # `provider` stops it before it reads that configuration
+  # (userAccount.controller.ts:1890). Both are pinned: in a case that makes one
+  # of them invalid, the other is still empty.
+  exchangeOAuthCode:
+    body.code: oauthExchange.empty
+    body.provider: oauthExchange.empty
 
 # Values that the suite file gives itself.
 constants:
@@ -47,6 +79,7 @@ constants:
   # `invalid` is a reserved top-level domain: nobody signs up with such an
   # address, and no mail to it can be delivered.
   email.withoutAccount: contract-no-account@pipeshub.invalid
+  oauthExchange.empty: ""
 
 headers:
   # The sign-in session that `initAuth` started for the fixture user. A refused
@@ -119,8 +152,15 @@ no_success_response:
       Needs a `fetch:config` token that only the backend services sign for each
       other. Without it every request is answered 401.
   - operation: exchangeOAuthCode
-    reason: Needs a one-time authorization code from an external identity provider.
+    reason: >-
+      Needs a one-time authorization code from an external identity provider,
+      and a request with a code would send the client secret of the configured
+      provider to it. So the suite sends `code` and `provider` empty, and every
+      request is answered 400 before any call to a provider.
 
-# `setUpAuthConfig` needs no entry: it answers 200 and does nothing once a
-# sign-in policy exists, and creating the organization always creates one
-# (org.controller.ts).
+# No entry is needed for two operations:
+# - `setUpAuthConfig` answers 200 and does nothing once a sign-in policy
+#   exists, and creating the organization always creates one (org.controller.ts).
+# - `samlSignInCallback` answers 302 to everything: without a `SAMLResponse`,
+#   or with an empty one, it redirects to the identity provider, and with one
+#   it cannot verify, or with no SAML configured, to the sign-in page.

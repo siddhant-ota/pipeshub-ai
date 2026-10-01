@@ -4,6 +4,11 @@
 # The four operations are public GETs without parameters, served at the root of
 # the server and not under /api/v1; the spec says so (`servers` on each
 # operation). They need no login, no value and no fixture.
+#
+# Three of them (all but `jwks`) create the OAuth app of the PipesHub agent the
+# first time anyone calls them, if the device grant is on
+# (oid.provider.controller.ts:111-113, oauth.first_party_device.service.ts).
+# The app stays; the product itself needs it.
 
 name: oidc-discovery
 
