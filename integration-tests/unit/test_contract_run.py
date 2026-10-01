@@ -471,3 +471,180 @@ def test_a_redirect_is_recorded_and_not_followed(
 
     assert followed.exists()
     assert {case.status for case in cases} == {302}
+
+
+def _planned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **suite_keys: object) -> Path:
+    """Plan a suite over real operations against the stub; returns the folder with its files."""
+    monkeypatch.setattr(runner, "REPORTS_DIR", tmp_path / "reports")
+    suite_path = tmp_path / "suite.yaml"
+    suite_path.write_text(yaml.safe_dump({"name": "planned", **suite_keys}), encoding="utf-8")
+    return runner.plan(load_suite(suite_path)).parent
+
+
+def test_an_upload_sends_the_real_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Schemathesis generates an empty file named after its form field; an API rejects that."""
+    picture = tmp_path / "contract-picture.png"
+    picture.write_bytes(b"\x89PNG real picture bytes")
+
+    folder = _planned(
+        tmp_path,
+        monkeypatch,
+        include_path_regex="^/users/dp$",
+        values_by_operation={"uploadUserDisplayPicture": {"body.file": "picture.path"}},
+        constants={"picture.path": str(picture)},
+    )
+    uploads = [
+        case for case in read_cases(folder / "events.ndjson") if case.label == "PUT /users/dp"
+    ]
+
+    with_file = [case for case in uploads if 'name="file"' in case.request_body]
+    assert any(not case.is_negative for case in with_file)
+    for case in with_file:
+        assert 'filename="contract-picture.png"' in case.request_body
+        assert "real picture bytes" in case.request_body
+        assert "Content-Type: image/png" in case.request_body
+    # The case that leaves the file out still leaves it out.
+    assert any(case.is_negative and case not in with_file for case in uploads)
+
+
+TITLE = "PATCH /conversations/{conversationId}/title"
+
+
+def test_a_name_that_is_different_in_each_request_and_a_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = _planned(
+        tmp_path,
+        monkeypatch,
+        include_path_regex=r"^/conversations/\{conversationId\}/title$",
+        path_parameters={
+            "defaults": [{"path_prefix": "/", "values": {"conversationId": "conversation.id"}}]
+        },
+        values_by_operation={"updateConversationTitle": {"body.title": "title.unique"}},
+        constants={"title.unique": "contract-{case}", "header.value": "yes"},
+        headers={"updateConversationTitle": {"X-Contract-Test": "header.value"}},
+    )
+    titles = [
+        case.request_json()["title"]
+        for case in read_cases(folder / "events.ndjson")
+        if isinstance(case.request_json(), dict)
+        and isinstance(case.request_json().get("title"), str)
+        and case.request_json()["title"].startswith("contract-")
+    ]
+
+    assert len(titles) > 1
+    assert len(set(titles)) == len(titles)
+    assert all(title.removeprefix("contract-").isdigit() for title in titles)
+    har = json.loads((folder / "requests.har").read_text(encoding="utf-8"))
+    for entry in har["log"]["entries"]:
+        headers = {header["name"]: header["value"] for header in entry["request"]["headers"]}
+        assert headers.get("X-Contract-Test") == "yes"
+
+
+def test_a_value_goes_into_a_request_that_is_invalid_elsewhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown property, or a missing one, next to an ID: the ID must still be the real one.
+
+    Otherwise the API can reject the request for the generated ID, and the test would pass
+    without showing that the API saw the invalid part.
+    """
+    folder = _planned(
+        tmp_path,
+        monkeypatch,
+        include_path_regex=r"^/conversations/\{conversationId\}/project$",
+        path_parameters={
+            "defaults": [{"path_prefix": "/", "values": {"conversationId": "conversation.id"}}]
+        },
+        values={"body.projectId": "project.id"},
+        constants={"project.id": "a" * 24},
+    )
+    with_project = [
+        case
+        for case in read_cases(folder / "events.ndjson")
+        if isinstance(case.request_json(), dict) and "projectId" in case.request_json()
+    ]
+
+    unknown_property = [case for case in with_project if "unexpected properties" in case.what]
+    assert unknown_property
+    assert all(case.request_json()["projectId"] == "a" * 24 for case in unknown_property)
+    # The cases about the field itself keep what they generated.
+    about_the_field = [
+        case for case in with_project if case.is_negative and "projectId" in case.schema_pointer
+    ]
+    assert about_the_field
+    assert all(case.request_json()["projectId"] != "a" * 24 for case in about_the_field)
+
+
+def test_a_run_refuses_a_file_that_is_not_there(suite: Suite, tmp_path: Path) -> None:
+    upload = load_suite(
+        write_suite(
+            tmp_path,
+            include_path_regex="^/files",
+            path_parameters={"defaults": [{"path_prefix": "/files", "values": {"fileId": "f"}}]},
+            values={"body.file": "file.path"},
+            client_chosen_ids=[],
+            ids_without_fixture=[],
+            constants={"f": "F1", "file.path": str(tmp_path / "absent.txt")},
+        ),
+        {
+            "paths": {
+                "/files/{fileId}": {
+                    "put": {
+                        "operationId": "replaceFile",
+                        "requestBody": {
+                            "content": {
+                                "multipart/form-data": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "file": {"type": "string", "format": "binary"}
+                                        },
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+        },
+    )
+    values = ContractValues(values=dict(upload.constants))
+
+    with pytest.raises(runner.RunnerError, match="a file that does not exist: .*absent.txt"):
+        runner.execute(upload, values, base_url="http://stub")
+
+
+def test_one_operation_can_create_several_things(tmp_path: Path) -> None:
+    suite = load_suite(
+        write_suite(
+            tmp_path,
+            auth={"createThing": {"token": "thing.token"}},
+            created_resources=[
+                {
+                    "operation": "createThing",
+                    "id_pointer": f"/things/{index}/_id",
+                    "delete_path": "/things/{id}",
+                }
+                for index in (0, 1)
+            ],
+        ),
+        SPEC,
+    )
+    events = write_events(
+        tmp_path,
+        [
+            case_event(
+                "POST /things",
+                case_id="a",
+                status=201,
+                response={"things": [{"_id": "n1"}, {"_id": "n2"}]},
+            )
+        ],
+    )
+
+    # Each is deleted with the token that the operation logs in with.
+    assert created_resources(suite, ALL_VALUES, events) == [
+        Leftover("/things/n1", "token", "thing.token"),
+        Leftover("/things/n2", "token", "thing.token"),
+    ]

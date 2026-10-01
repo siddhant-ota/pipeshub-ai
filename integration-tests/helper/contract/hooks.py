@@ -4,7 +4,9 @@ the `hooks` key of its config, in the process that `runner.py` starts."""
 from __future__ import annotations
 
 import base64
+import itertools
 import json
+import mimetypes
 import os
 import sys
 import time
@@ -12,18 +14,24 @@ from pathlib import Path
 from typing import Any
 
 import schemathesis
+from schemathesis.transport import SerializationContext
+from schemathesis.transport.prepare import prepare_body
+from schemathesis.transport.requests import multipart_serializer
 
 # `helper.*` is a namespace package rooted at integration-tests/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from helper.contract.config import (
     BASE_URL_ENV,
+    FILES_ENV,
+    HEADERS_ENV,
     LOGINS_ENV,
     STATIC_AUTHORIZATION_ENV,
     SUBSTITUTIONS_ENV,
     TOKENS_ENV,
 )
 from helper.contract.suite import AUTH_NONE, AUTH_OAUTH_CLIENT, AUTH_SESSION, AUTH_TOKEN
+from helper.contract.fields import ANY_ITEM
 from helper.contract.values import (
     BODY,
     PATH,
@@ -48,8 +56,14 @@ _SUBSTITUTIONS: dict[str, list[Substitution]] = {
     label: [Substitution.for_field(name, value) for name, value in fields.items()]
     for label, fields in _from_env(SUBSTITUTIONS_ENV).items()
 }
+# Operation label -> form field of its multipart body -> path of the file to send in it.
+_FILES: dict[str, dict[str, str]] = _from_env(FILES_ENV)
+# Operation label -> header name -> value.
+_HEADERS: dict[str, dict[str, str]] = _from_env(HEADERS_ENV)
 _LOGINS: dict[str, str] = _from_env(LOGINS_ENV)
 _TOKENS: dict[str, str] = _from_env(TOKENS_ENV)
+# The number of the request, for values that must be different in each one.
+_case_numbers = itertools.count(1)
 
 
 def _expiry(token: str) -> float:
@@ -135,6 +149,55 @@ def _mutation(case: schemathesis.Case, location: str) -> Mutation | None:
     )
 
 
+def _real_part(part: Any, path: Path) -> Any:
+    """A file part of a multipart body, with the name, content and type of the file at `path`.
+
+    `part` is what Schemathesis made of the generated value: `(file name, content)` with an
+    optional content type, where the file name is that of the form field.
+    """
+    if not isinstance(part, tuple) or len(part) < 2 or part[0] is None:
+        return part
+    content_type = part[2] if len(part) > 2 else mimetypes.guess_type(path.name)[0]
+    real = (path.name, path.read_bytes())
+    return (*real, content_type) if content_type else real
+
+
+def _send_real_files(case: schemathesis.Case, kwargs: dict[str, Any]) -> None:
+    """Send a real file where the body has a file field that the suite gives a file for.
+
+    Schemathesis generates an empty file and names it after its form field. An API that looks
+    at the extension or the content rejects that, so no generated upload could succeed.
+    """
+    # A plan has placeholders for the values of fixtures; those name no file.
+    files = {
+        name: path
+        for name, path in _FILES.get(case.operation.label, {}).items()
+        if Path(path).is_file()
+    }
+    if not isinstance(case.body, dict) or not set(files) & set(case.body):
+        return
+    mutation = _mutation(case, BODY)
+    body = prepare_body(case)
+    if not isinstance(body, dict):
+        return
+    # On a copy: the serializer changes the body it is given, and Schemathesis serializes the
+    # body of the case again when it sends the request.
+    parts = multipart_serializer(SerializationContext(case=case), dict(body)).get("files")
+    if not parts:
+        return
+    kwargs["files"] = [
+        (
+            name,
+            part
+            if name not in files
+            or is_under_test(Substitution(BODY, (name,), ""), mutation)
+            or is_under_test(Substitution(BODY, (name, ANY_ITEM), ""), mutation)
+            else _real_part(part, Path(files[name])),
+        )
+        for name, part in parts
+    ]
+
+
 @schemathesis.hook
 def before_call(
     ctx: schemathesis.HookContext, case: schemathesis.Case, kwargs: dict[str, Any]
@@ -142,13 +205,20 @@ def before_call(
     # A redirect is the answer to check: the spec documents the 302. Following it would judge
     # the response of another page, and send a request to wherever a generated URL points.
     kwargs.setdefault("allow_redirects", False)
-    substitutions = _SUBSTITUTIONS.get(case.operation.label, ())
+    for name, value in _HEADERS.get(case.operation.label, {}).items():
+        case.headers[name] = value
+    number = next(_case_numbers)
+    substitutions = [
+        substitution.for_case(number)
+        for substitution in _SUBSTITUTIONS.get(case.operation.label, ())
+    ]
     # Read before anything is replaced: Schemathesis looks at a changed request again, and may
     # then describe it differently.
     mutations = {
         substitution.location: _mutation(case, substitution.location)
         for substitution in substitutions
     }
+    _send_real_files(case, kwargs)
     for substitution in substitutions:
         if is_under_test(substitution, mutations[substitution.location]):
             continue

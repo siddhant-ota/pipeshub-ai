@@ -15,12 +15,16 @@ from typing import Any
 from helper.contract.baseline import load_baseline
 from helper.contract.config import (
     BASE_URL_ENV,
+    FILES_ENV,
+    HEADERS_ENV,
     LOGINS_ENV,
     STATIC_AUTHORIZATION_ENV,
     SUBSTITUTIONS_ENV,
     TOKENS_ENV,
     OperationRun,
     build_config,
+    build_files,
+    build_headers,
     build_logins,
     build_substitutions,
     build_tokens,
@@ -28,6 +32,7 @@ from helper.contract.config import (
     write_config,
     write_json,
 )
+from helper.contract.redaction import redact_run_files
 from helper.contract.report import write_plan, write_report
 from helper.contract.results import OperationResult, collect
 from helper.contract.sources import SECRET, FixtureRow
@@ -53,6 +58,9 @@ _COMPLETED_EXIT_CODES = (0, 1)
 # `stop_reason` of a run in which every selected operation went through every phase.
 _RAN_TO_THE_END = "completed"
 _PLACEHOLDER = "0" * 24
+# For a value that goes where the spec wants a UUID; the other placeholder would make
+# every valid case of that operation an invalid one in the plan.
+_UUID_PLACEHOLDER = "00000000-0000-4000-8000-000000000000"
 
 
 class RunnerError(Exception):
@@ -223,6 +231,8 @@ def _prepare(
     )
     env = {
         SUBSTITUTIONS_ENV: json.dumps(substitutions),
+        FILES_ENV: json.dumps(build_files(suite, values, runs)),
+        HEADERS_ENV: json.dumps(build_headers(suite, values, runs)),
         LOGINS_ENV: json.dumps(build_logins(suite, runs)),
         TOKENS_ENV: json.dumps(build_tokens(suite, values, runs)),
     }
@@ -242,6 +252,14 @@ def execute(
     files = run_files(suite)
     _discard_previous_run(files)
     runs, config, env = _prepare(suite, values, files, selected)
+    absent = sorted(
+        path
+        for fields in json.loads(env[FILES_ENV]).values()
+        for path in fields.values()
+        if not Path(path).is_file()
+    )
+    if absent:
+        raise RunnerError(f"A fixture gave a file that does not exist: {', '.join(absent)}")
     api_url = f"{base_url}{suite.api_prefix}"
     write_json(
         {
@@ -252,7 +270,11 @@ def execute(
         files.manifest,
     )
     if any(run.is_sent for run in runs):
-        _run_schemathesis(suite, files, api_url=api_url, env={**env, BASE_URL_ENV: base_url})
+        try:
+            _run_schemathesis(suite, files, api_url=api_url, env={**env, BASE_URL_ENV: base_url})
+        finally:
+            secrets = {str(values.values[key]) for key in values.secret if key in values.values}
+            redact_run_files((files.events, files.har), secrets)
     return judge(suite, baseline_path)
 
 
@@ -282,7 +304,13 @@ def plan(
     files = run_files(suite, "plan")
     _discard_previous_run(files)
     values = ContractValues(
-        values={**dict.fromkeys(suite.fixture_keys, _PLACEHOLDER), **suite.constants}
+        values={
+            **{
+                key: _UUID_PLACEHOLDER if key in suite.uuid_keys else _PLACEHOLDER
+                for key in suite.fixture_keys
+            },
+            **suite.constants,
+        }
     )
     runs, config, env = _prepare(suite, values, files, selected)
     # The stub needs no rate limit.

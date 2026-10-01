@@ -1,6 +1,7 @@
 """The pytest side of a contract suite. Every suite uses it the same way.
 
-In the suite's `conftest.py`, after its fixtures and `VALUE_SOURCES`:
+In the suite's `conftest.py`, after its fixtures (module scope, so that they are torn down
+when the tests of the suite are done, before the next suite starts) and `VALUE_SOURCES`:
 
     contract_values, contract_run = suite_fixtures(SUITE_PATH, VALUE_SOURCES)
 
@@ -42,6 +43,7 @@ from helper.contract.sources import ValueSource, fixture_rows
 from helper.contract.suite import (
     AUTH_OAUTH_CLIENT,
     AUTH_SESSION,
+    AUTH_TOKEN,
     PROFILE_SKIP,
     Suite,
     SuiteError,
@@ -57,9 +59,12 @@ TEST_MODULE_GLOB = "integration_test_*_contract.py"
 # The fixture that gives each login its client, for deleting what the test cases created.
 _CLIENT_FIXTURES = {AUTH_OAUTH_CLIENT: "pipeshub_client", AUTH_SESSION: "user_session_client"}
 
+# How long a delete of what a test case created may take.
+_DELETE_TIMEOUT_SEC = 60
+
 CONTRACT_MARKS = [
     pytest.mark.contract,
-    # One group for all suites: a suite's run is one session fixture, so its tests must be on
+    # One group for all suites: a suite's run is one fixture, so its tests must be on
     # the worker that has it, and two suites must not change the same deployment at once.
     # It is the group the root conftest pins the other serial suites to.
     pytest.mark.xdist_group("serial"),
@@ -77,16 +82,30 @@ def response_body(resp: requests.Response, expected: tuple[int, ...], what: str)
     return body
 
 
-def delete_quietly(what: str, delete: Callable[[], requests.Response]) -> None:
-    """Delete one thing. A failure is logged and must not stop the deletes after it."""
+def _quietly(
+    verb: str, what: str, call: Callable[[], requests.Response], also_fine: tuple[int, ...] = ()
+) -> bool:
+    """Make one teardown call. A failure is logged and must not stop the calls after it."""
     try:
-        resp = delete()
+        resp = call()
     except Exception as exc:  # noqa: BLE001 - for example a token that cannot be renewed
-        logger.warning("Could not delete %s: %s", what, exc)
-        return
+        logger.warning("Could not %s %s: %s", verb, what, exc)
+        return False
+    done = resp.status_code < 400 or resp.status_code in also_fine
+    if not done:
+        logger.warning("Could not %s %s: HTTP %s %s", verb, what, resp.status_code, resp.text[:200])
+    return done
+
+
+def delete_quietly(what: str, delete: Callable[[], requests.Response]) -> None:
+    """Delete one thing in a fixture teardown."""
     # 404: the operation under test already removed it.
-    if resp.status_code >= 400 and resp.status_code != 404:
-        logger.warning("Could not delete %s: HTTP %s %s", what, resp.status_code, resp.text[:200])
+    _quietly("delete", what, delete, also_fine=(404,))
+
+
+def restore_quietly(what: str, restore: Callable[[], requests.Response]) -> bool:
+    """Put one setting back in a fixture teardown. False if the API refused it."""
+    return _quietly("restore", what, restore)
 
 
 def operation_params(suite: Suite) -> list[Any]:
@@ -156,25 +175,37 @@ def _delete_leftovers(request: pytest.FixtureRequest, suite: Suite, values: Cont
     def _delete(fixture: str, path: str) -> requests.Response:
         return request.getfixturevalue(fixture).request("DELETE", f"{suite.api_prefix}{path}")
 
+    def _delete_with_token(token: str, path: str) -> requests.Response:
+        base_url = request.getfixturevalue(_CLIENT_FIXTURES[AUTH_OAUTH_CLIENT]).base_url
+        return requests.delete(
+            f"{base_url}{suite.api_prefix}{path}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=_DELETE_TIMEOUT_SEC,
+        )
+
     for leftover in created_resources(suite, values, run_files(suite).events):
         if "{" in leftover.path:
             logger.warning("Not deleted, a value in its path is missing: %s", leftover.path)
-            continue
-        fixture = _CLIENT_FIXTURES.get(leftover.auth)
-        if fixture is None:
-            logger.warning("Not deleted, no client for `%s`: %s", leftover.auth, leftover.path)
-            continue
-        delete_quietly(leftover.path, partial(_delete, fixture, leftover.path))
+        elif leftover.auth == AUTH_TOKEN:
+            token = str(values.values[leftover.token_key])
+            delete_quietly(leftover.path, partial(_delete_with_token, token, leftover.path))
+        elif leftover.auth in _CLIENT_FIXTURES:
+            fixture = _CLIENT_FIXTURES[leftover.auth]
+            delete_quietly(leftover.path, partial(_delete, fixture, leftover.path))
+        else:
+            logger.warning("Not deleted, no login `%s`: %s", leftover.auth, leftover.path)
 
 
 def suite_fixtures(suite_path: Path, sources: tuple[ValueSource, ...]) -> tuple[Any, Any]:
     """The `contract_values` and `contract_run` fixtures of the suite at `suite_path`."""
 
-    @pytest.fixture(scope="session", name="contract_values")
+    # Module scope: what the suite created and changed is put back when its tests are done,
+    # and not at the end of the session, when the other suites have already run with it.
+    @pytest.fixture(scope="module", name="contract_values")
     def contract_values(request: pytest.FixtureRequest) -> ContractValues:
         return collect_values(request, load_suite(suite_path), sources)
 
-    @pytest.fixture(scope="session", name="contract_run")
+    @pytest.fixture(scope="module", name="contract_run")
     def contract_run(
         request: pytest.FixtureRequest, pipeshub_client: Any, contract_values: ContractValues
     ) -> Iterator[ContractRun]:

@@ -17,6 +17,8 @@ class Leftover:
 
     path: str
     auth: str
+    # AUTH_TOKEN: the value key of the token.
+    token_key: str = ""
 
 
 def _at_pointer(document: Any, pointer: str) -> Any:
@@ -37,17 +39,19 @@ def created_resources(suite: Suite, values: ContractValues, events_path: Path) -
     """
     if not events_path.exists():
         return []
-    rules = {rule.operation.label: rule for rule in suite.created_resources}
     leftovers: list[Leftover] = []
     for case in read_cases(events_path):
-        rule = rules.get(case.label)
-        if rule is None or case.status is None or not 200 <= case.status < 300:
+        if case.status is None or not 200 <= case.status < 300:
             continue
-        resource_id = _at_pointer(case.response_json(), rule.id_pointer)
-        if not isinstance(resource_id, str) or not resource_id:
-            continue
-        path = rule.delete_path.replace("{id}", resource_id)
-        for key, value in values.values.items():
-            path = path.replace(f"{{{key}}}", value)
-        leftovers.append(Leftover(path, rule.auth))
+        # One operation can have several rules: an upload answers with a list of new records.
+        for rule in suite.created_resources:
+            if rule.operation.label != case.label:
+                continue
+            resource_id = _at_pointer(case.response_json(), rule.id_pointer)
+            if not isinstance(resource_id, str) or not resource_id:
+                continue
+            path = rule.delete_path.replace("{id}", resource_id)
+            for key, value in values.values.items():
+                path = path.replace(f"{{{key}}}", str(value))
+            leftovers.append(Leftover(path, rule.auth, rule.token_key))
     return leftovers

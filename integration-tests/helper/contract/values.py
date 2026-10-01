@@ -3,8 +3,9 @@
 `hooks.py` puts the values into each request with the functions below, just
 before it is sent. Schemathesis has its own setting for this, but it replaces
 the value in every request, also in the one that tests that very parameter.
-Here the field under test in an invalid request is left alone. A query or body
-value replaces a string that is already in the request; it is never added.
+Here the field under test in an invalid request is left alone, and every other
+field gets its value, so that the request is invalid in one way only. A query or
+body value replaces a generated value of its own type; it is never added.
 """
 
 from __future__ import annotations
@@ -12,19 +13,25 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from helper.contract.fields import ANY_ITEM, ARRAY_ITEM, pointer_path
+from helper.contract.fields import ANY_ITEM, ANY_KEY, ARRAY_ITEM, pointer_path
 
 BODY = "body"
 QUERY = "query"
 PATH = "path"
 _LOCATIONS = (BODY, QUERY, PATH)
+# In a value: replaced by a number that is different in each request, for a name that must
+# be unique. `contract-team-{case}` gives `contract-team-1`, `contract-team-2`, ...
+CASE_NUMBER = "{case}"
+
+# A value from a fixture is text. A constant of the suite file can be a number or a boolean.
+Value = str | int | float | bool
 
 
 @dataclass
 class ContractValues:
     """The values a run can use, and why any other value is missing."""
 
-    values: dict[str, str] = field(default_factory=dict)
+    values: dict[str, Value] = field(default_factory=dict)
     # value key -> why the fixture that provides it failed
     missing: dict[str, str] = field(default_factory=dict)
     # way to log in (`session`, ...) -> why this run cannot use it
@@ -37,12 +44,20 @@ class ContractValues:
 class Substitution:
     location: str
     path: tuple[str, ...]
-    value: str
+    value: Value
 
     @classmethod
-    def for_field(cls, field_name: str, value: str) -> Substitution:
+    def for_field(cls, field_name: str, value: Value) -> Substitution:
         location, path = parse_field(field_name)
         return cls(location, path, value)
+
+    def for_case(self, number: int) -> Substitution:
+        """The substitution for one request: `{case}` in the value becomes its number."""
+        if isinstance(self.value, str) and CASE_NUMBER in self.value:
+            return Substitution(
+                self.location, self.path, self.value.replace(CASE_NUMBER, str(number))
+            )
+        return self
 
 
 @dataclass(frozen=True)
@@ -56,6 +71,16 @@ class Mutation:
     schema_pointer: str
 
 
+def _segments(part: str) -> list[str]:
+    """`kb[*]` -> [`kb`, `*`]; `roles{*}` -> [`roles`, `{*}`]."""
+    suffixes: list[str] = []
+    while part.endswith((ARRAY_ITEM, ANY_KEY)):
+        suffix = ARRAY_ITEM if part.endswith(ARRAY_ITEM) else ANY_KEY
+        suffixes.insert(0, ANY_ITEM if suffix == ARRAY_ITEM else ANY_KEY)
+        part = part[: -len(suffix)]
+    return [part, *suffixes]
+
+
 def parse_field(field_name: str) -> tuple[str, tuple[str, ...]]:
     """`body.filters.kb[*]` -> (`body`, (`filters`, `kb`, `*`))."""
     location, _, rest = field_name.partition(".")
@@ -63,36 +88,52 @@ def parse_field(field_name: str) -> tuple[str, tuple[str, ...]]:
         raise ValueError(
             f"A request field starts with `body.`, `query.` or `path.`: {field_name!r}"
         )
-    path: list[str] = []
-    for part in rest.split("."):
-        name = part
-        while name.endswith(ARRAY_ITEM):
-            name = name[: -len(ARRAY_ITEM)]
-        path.append(name)
-        path.extend([ANY_ITEM] * ((len(part) - len(name)) // len(ARRAY_ITEM)))
-    return location, tuple(path)
+    return location, tuple(segment for part in rest.split(".") for segment in _segments(part))
 
 
 def is_under_test(substitution: Substitution, mutation: Mutation | None) -> bool:
-    """True if the negative case made this very field, or what contains it, invalid."""
+    """True if the negative case made this very field invalid.
+
+    Not if it made something around the field invalid (a property that is
+    missing next to it, an unknown one, an array with too many items): the
+    field then gets its value like in any other request. Otherwise the API
+    could reject the request for the generated ID, and the test would pass
+    without showing that the API saw the invalid part.
+    """
     if mutation is None or mutation.location != substitution.location:
         return False
     if substitution.location in (QUERY, PATH):
         return mutation.parameter == substitution.path[0]
-    mutated = pointer_path(mutation.schema_pointer)
-    shared = min(len(mutated), len(substitution.path))
-    return mutated[:shared] == substitution.path[:shared]
+    # A value under a free-form key has no schema pointer of its own to compare with.
+    return pointer_path(mutation.schema_pointer) == tuple(
+        segment for segment in substitution.path if segment != ANY_KEY
+    )
 
 
-def _replace(node: Any, path: tuple[str, ...], value: str) -> tuple[Any, int]:
+def _same_kind(generated: Any, value: Value) -> bool:
+    """A value replaces only a generated value of its own type: a wrong type is left as it is."""
+    if isinstance(value, bool) or isinstance(generated, bool):
+        return isinstance(value, bool) and isinstance(generated, bool)
+    if isinstance(value, str):
+        return isinstance(generated, str)
+    return isinstance(generated, int | float)
+
+
+def _replace(node: Any, path: tuple[str, ...], value: Value) -> tuple[Any, int]:
     if not path:
-        return (value, 1) if isinstance(node, str) else (node, 0)
+        return (value, 1) if _same_kind(node, value) else (node, 0)
     head, rest = path[0], path[1:]
     if head == ANY_ITEM:
         if not isinstance(node, list):
             return node, 0
         replaced = [_replace(item, rest, value) for item in node]
         return [item for item, _ in replaced], sum(count for _, count in replaced)
+    if head == ANY_KEY:
+        if not isinstance(node, dict):
+            return node, 0
+        under_keys = {key: _replace(item, rest, value) for key, item in node.items()}
+        count = sum(count for _, count in under_keys.values())
+        return ({key: item for key, (item, _) in under_keys.items()}, count) if count else (node, 0)
     if not isinstance(node, dict) or head not in node:
         return node, 0
     child, count = _replace(node[head], rest, value)
@@ -100,5 +141,5 @@ def _replace(node: Any, path: tuple[str, ...], value: str) -> tuple[Any, int]:
 
 
 def substitute(container: Any, substitution: Substitution) -> tuple[Any, int]:
-    """Return `container` with the value put in, and how many strings it replaced."""
+    """Return `container` with the value put in, and how many values it replaced."""
     return _replace(container, substitution.path, substitution.value)

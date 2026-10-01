@@ -379,7 +379,13 @@ def test_no_2xx_response_leaves_the_operation_unverified(tmp_path: Path) -> None
     result = _collect(tmp_path, [not_found])
 
     assert result.verdict == VERDICT_UNVERIFIED
-    assert "No request got a 2xx response" in result.gap
+    assert "No request got a 2xx or 3xx response" in result.gap
+
+
+def test_a_redirect_is_the_success_of_an_operation_that_documents_one(tmp_path: Path) -> None:
+    redirect = case_event(LIST, case_id="c1", status=302, passed=(STATUS_CODE,))
+
+    assert _collect(tmp_path, [redirect]).verdict == VERDICT_MATCH
 
 
 def test_a_baseline_does_not_excuse_an_unverified_operation(tmp_path: Path) -> None:

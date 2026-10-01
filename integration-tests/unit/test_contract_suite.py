@@ -199,13 +199,6 @@ def test_an_examples_only_operation(tmp_path: Path) -> None:
             "listThings is in `examples_only` and in another list",
         ),
         (
-            {
-                "ids_without_fixture": [],
-                "values": {**SUITE["values"], "body.notes{*}.authorId": "user.id"},
-            },
-            "a field under a free-form key cannot get a value",
-        ),
-        (
             {"values": {**SUITE["values"], "path.thingId": "thing.id"}},
             "path parameters get their value under `path_parameters`: path.thingId",
         ),
@@ -390,3 +383,105 @@ def test_a_path_parameter_with_listed_values_needs_no_value(tmp_path: Path) -> N
 
     with pytest.raises(SuiteError, match=r"no value for path parameter\(s\) thingId$"):
         load_suite(write_suite(tmp_path, **keys, path_parameters={}), spec)
+
+
+def test_a_field_under_a_free_form_key_can_get_a_value(tmp_path: Path) -> None:
+    suite = load_suite(
+        write_suite(
+            tmp_path,
+            ids_without_fixture=[],
+            values={**SUITE["values"], "body.notes{*}.authorId": "user.id"},
+        ),
+        SPEC,
+    )
+    by_id = {planned.operation.operation_id: planned for planned in suite.operations}
+
+    assert by_id["createThing"].field_values["body.notes{*}.authorId"] == "user.id"
+
+
+def test_a_constant_keeps_its_type(tmp_path: Path) -> None:
+    suite = load_suite(
+        write_suite(tmp_path, constants={"thing.enabled": False, "thing.size": 3}), SPEC
+    )
+
+    assert suite.constants == {"thing.enabled": False, "thing.size": 3}
+
+
+def _upload_spec(file_schema: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "paths": {
+            "/files/{fileId}": {
+                "put": {
+                    "operationId": "replaceFile",
+                    "parameters": [
+                        {
+                            "name": "fileId",
+                            "in": "path",
+                            "schema": {"type": "string", "format": "uuid"},
+                        }
+                    ],
+                    "requestBody": {
+                        "content": {
+                            "multipart/form-data": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "file": file_schema,
+                                        "folderId": {"type": "string"},
+                                    },
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("file_schema", "name"),
+    [
+        ({"type": "string", "format": "binary"}, "body.file"),
+        ({"type": "array", "items": {"type": "string", "format": "binary"}}, "body.file[*]"),
+    ],
+)
+def test_a_file_of_a_multipart_body_gets_a_file(
+    tmp_path: Path, file_schema: dict[str, Any], name: str
+) -> None:
+    suite = load_suite(
+        write_suite(
+            tmp_path,
+            include_path_regex="^/files",
+            path_parameters={
+                "defaults": [{"path_prefix": "/files", "values": {"fileId": "file.id"}}]
+            },
+            values={"body.folderId": "folder.id", name: "file.path"},
+            client_chosen_ids=[],
+            ids_without_fixture=[],
+        ),
+        _upload_spec(file_schema),
+    )
+    (planned,) = suite.operations
+
+    assert planned.file_fields == (name,)
+    assert planned.field_values == {"body.folderId": "folder.id", name: "file.path"}
+    # The path parameter is a UUID in the spec, so a plan must put a UUID there.
+    assert suite.uuid_keys == {"file.id"}
+
+
+def test_a_header_for_an_operation(tmp_path: Path) -> None:
+    suite = load_suite(
+        write_suite(
+            tmp_path,
+            headers={"listThings": {"Accept": "stream.accept"}},
+            constants={"stream.accept": "text/event-stream"},
+        ),
+        SPEC,
+    )
+    by_id = {planned.operation.operation_id: planned for planned in suite.operations}
+
+    # The value of a header is a value key, like every other value of the suite.
+    assert by_id["listThings"].header_values == {"Accept": "stream.accept"}
+    assert "stream.accept" in by_id["listThings"].value_keys
+    assert by_id["createThing"].header_values == {}

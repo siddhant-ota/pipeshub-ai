@@ -13,9 +13,14 @@ from typing import Any
 
 import yaml
 
-from helper.contract.fields import ANY_KEY, enumerated_path_parameters, request_fields
+from helper.contract.fields import (
+    UUID_FORMAT,
+    enumerated_path_parameters,
+    path_parameter_formats,
+    request_fields,
+)
 from helper.contract.spec import Operation, load_spec, operations_in_scope
-from helper.contract.values import PATH
+from helper.contract.values import PATH, Value
 
 # Valid and invalid requests.
 PROFILE_FULL = "full"
@@ -62,18 +67,29 @@ class PlannedOperation:
     field_values: dict[str, str] = field(default_factory=dict)
     # Fields that must name something that exists, and for which no fixture gives a value.
     fixtureless_fields: tuple[str, ...] = ()
+    # Those of `field_values` that are a file of a multipart body; their value is the path of a file.
+    file_fields: tuple[str, ...] = ()
     auth: str = AUTH_OAUTH_CLIENT
     # AUTH_TOKEN: the value key of the token.
     token_key: str = ""
     # For example `10/m`, for an operation with a stricter limit than the rest of the API.
     rate_limit: str = ""
+    # header name -> value key. Every request of the operation carries these headers: one
+    # that the API needs and the spec does not describe (`Accept` for a stream), or one whose
+    # value only a fixture has (a sign-in session).
+    header_values: dict[str, str] = field(default_factory=dict)
     # Value keys that must exist for the operation to be sent, and that go into no request:
     # a fixture that saves a setting and puts it back, or one that prepares the deployment.
     required_keys: tuple[str, ...] = ()
 
     @property
     def value_keys(self) -> set[str]:
-        keys = {*self.path_values.values(), *self.field_values.values(), *self.required_keys}
+        keys = {
+            *self.path_values.values(),
+            *self.field_values.values(),
+            *self.header_values.values(),
+            *self.required_keys,
+        }
         return keys | {self.token_key} if self.token_key else keys
 
 
@@ -86,6 +102,7 @@ class CreatedResource:
     delete_path: str
     # How to log in to delete it: as for the operation that created it.
     auth: str = AUTH_OAUTH_CLIENT
+    token_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -99,7 +116,9 @@ class Suite:
     # Replaces the rate limit of schemathesis.base.toml for the whole suite.
     rate_limit: str = ""
     # value key -> a value that the suite file itself gives
-    constants: dict[str, str] = field(default_factory=dict)
+    constants: dict[str, Value] = field(default_factory=dict)
+    # Value keys that go where the spec wants a UUID, so that a plan can use one in their place.
+    uuid_keys: frozenset[str] = frozenset()
 
     @property
     def value_keys(self) -> set[str]:
@@ -197,6 +216,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
     logins: dict[str, Any] = raw.get("auth") or {}
     rate_limits: dict[str, str] = raw.get("operation_rate_limits") or {}
     requires: dict[str, list[str]] = raw.get("requires") or {}
+    headers: dict[str, dict[str, str]] = raw.get("headers") or {}
 
     referenced = {
         *profiles,
@@ -205,6 +225,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
         *logins,
         *rate_limits,
         *requires,
+        *headers,
         *((raw.get("path_parameters") or {}).get("operations") or {}),
         *(entry["operation"] for entry in raw.get("created_resources") or []),
     }
@@ -219,6 +240,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
         )
 
     seen_fields: set[str] = set()
+    uuid_keys: set[str] = set()
     planned: list[PlannedOperation] = []
     for operation in in_scope:
         operation_id = operation.operation_id
@@ -260,6 +282,20 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
                 f"`{_CLIENT_CHOSEN}` or `{_WITHOUT_FIXTURE}`: {', '.join(undecided)}"
             )
         auth, token_key = _login(operation, logins.get(operation_id), problems)
+        field_values = {
+            name: own_values.get(name) or values[name]
+            for name in sorted(names)
+            if name in own_values or name in values
+        }
+        formats = {
+            **{request_field.name: request_field.format for request_field in fields},
+            **path_parameter_formats(spec, operation),
+        }
+        uuid_keys.update(
+            key
+            for name, key in {**field_values, **path_values}.items()
+            if formats.get(name) == UUID_FORMAT
+        )
 
         planned.append(
             PlannedOperation(
@@ -268,11 +304,12 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
                 reason=reason,
                 no_success_reason=no_success.get(operation_id, ""),
                 path_values=path_values,
-                field_values={
-                    name: own_values.get(name) or values[name]
-                    for name in sorted(names)
-                    if name in own_values or name in values
-                },
+                field_values=field_values,
+                file_fields=tuple(
+                    request_field.name
+                    for request_field in fields
+                    if request_field.is_file and request_field.name in field_values
+                ),
                 fixtureless_fields=tuple(
                     request_field.name
                     for request_field in fields
@@ -283,6 +320,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
                 token_key=token_key,
                 rate_limit=str(rate_limits.get(operation_id) or ""),
                 required_keys=tuple(requires.get(operation_id) or ()),
+                header_values=dict(headers.get(operation_id) or {}),
             )
         )
 
@@ -297,12 +335,6 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
         if first & second:
             problems.append(f"fields in more than one list: {', '.join(sorted(first & second))}")
     given = {*values, *(name for fields in values_by_operation.values() for name in fields)}
-    free_form = sorted(name for name in given if ANY_KEY in name)
-    if free_form:
-        problems.append(
-            "a field under a free-form key cannot get a value; list it under "
-            f"`{_WITHOUT_FIXTURE}` instead: {', '.join(free_form)}"
-        )
     in_the_path = sorted(name for name in given if name.startswith(f"{PATH}."))
     if in_the_path:
         problems.append(
@@ -312,7 +344,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
     if problems:
         raise SuiteError(f"{path} does not agree with the spec:\n- " + "\n- ".join(problems))
 
-    auth_by_id = {entry.operation.operation_id: entry.auth for entry in planned}
+    planned_by_id = {entry.operation.operation_id: entry for entry in planned}
     return Suite(
         name=raw["name"],
         include_path_regex=raw["include_path_regex"],
@@ -322,11 +354,13 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
                 by_id[entry["operation"]],
                 entry["id_pointer"],
                 entry["delete_path"],
-                auth_by_id[entry["operation"]],
+                planned_by_id[entry["operation"]].auth,
+                planned_by_id[entry["operation"]].token_key,
             )
             for entry in raw.get("created_resources") or []
         ),
         api_prefix=prefixes[0] if prefixes else "",
         rate_limit=str(raw.get("rate_limit") or ""),
-        constants={key: str(value) for key, value in (raw.get("constants") or {}).items()},
+        constants=dict(raw.get("constants") or {}),
+        uuid_keys=frozenset(uuid_keys),
     )

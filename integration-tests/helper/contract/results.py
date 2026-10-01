@@ -129,7 +129,8 @@ class OperationResult:
 
     @property
     def success_responses(self) -> int:
-        return sum(count for status, count in self.statuses.items() if status.startswith("2"))
+        """2xx answers, and 3xx: for a sign-in redirect the 302 is the success."""
+        return sum(count for status, count in self.statuses.items() if status[:1] in ("2", "3"))
 
     @property
     def validation_rejections(self) -> int:
@@ -166,7 +167,7 @@ class OperationResult:
         if self.run.no_success_reason or self.success_responses:
             return ""
         return (
-            "No request got a 2xx response, so the success response was not checked "
+            "No request got a 2xx or 3xx response, so the success response was not checked "
             "against the spec. Give the operation valid values, or declare it under "
             "`no_success_response` in the suite file."
         )

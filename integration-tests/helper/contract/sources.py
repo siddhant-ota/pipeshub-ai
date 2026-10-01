@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from helper.contract.suite import PROFILE_SKIP, Suite
-from helper.contract.values import ContractValues
+from helper.contract.values import ContractValues, Value
 
 # The fixtures of a suite are in the conftest.py next to its suite file.
 CONFTEST_NAME = "conftest.py"
@@ -45,7 +45,7 @@ class FixtureRow:
     # IDs of the operations that use one of its values.
     operations: tuple[str, ...] = ()
     # value key -> the value in this run; empty in a plan
-    values: dict[str, str] = field(default_factory=dict)
+    values: dict[str, Value] = field(default_factory=dict)
     # Why the fixture gave no values in this run, or "".
     problem: str = ""
 
@@ -106,6 +106,11 @@ def load_value_sources(suite_path: Path) -> tuple[ValueSource, ...]:
     if not conftest.exists():
         return ()
     name = f"contract_conftest_{abs(hash(str(conftest.resolve())))}"
+    # The integration-test helpers import each other by bare name (`from pipeshub_client import
+    # ...`); the root conftest puts their folder on the path, and so must this.
+    helpers = str(Path(__file__).resolve().parents[1])
+    if helpers not in sys.path:
+        sys.path.insert(0, helpers)
     if name not in sys.modules:
         spec = importlib.util.spec_from_file_location(name, conftest)
         if spec is None or spec.loader is None:

@@ -93,20 +93,34 @@ THING = Substitution.for_field("path.thingId", "T")
     [
         # A valid part of the request.
         (KB, None, False),
-        # The case is about this field, its parent, or the whole body.
+        # The case is about this very field.
         (
             KB,
             Mutation("body", "application/json", "/properties/filters/properties/kb/items/type"),
             True,
         ),
-        (KB, Mutation("body", "application/json", "/properties/filters/type"), True),
-        (KB, Mutation("body", "application/json", "/type"), True),
+        (
+            KB,
+            Mutation(
+                "body",
+                "application/json",
+                "/allOf/0/properties/filters/properties/kb/items/pattern",
+            ),
+            True,
+        ),
+        # The case is about what is around the field: a missing or unknown property next to it,
+        # the number of items. The field still gets its value, so that the request is invalid
+        # in that one way only. (Where the case changes the type of a parent, there is no such
+        # field in the request, and nothing to replace.)
+        (KB, Mutation("body", "application/json", "/properties/filters/type"), False),
+        (KB, Mutation("body", "application/json", "/required"), False),
+        (KB, Mutation("body", "application/json", "/type"), False),
         (
             KB,
             Mutation(
                 "body", "application/json", "/allOf/0/properties/filters/properties/kb/maxItems"
             ),
-            True,
+            False,
         ),
         # The case is about another body field: the ID must still be real.
         (
@@ -129,3 +143,50 @@ def test_the_field_under_test_keeps_its_invalid_value(
     substitution: Substitution, mutation: Mutation | None, expected: bool
 ) -> None:
     assert is_under_test(substitution, mutation) is expected
+
+
+def test_a_value_under_a_free_form_key() -> None:
+    substitution = Substitution.for_field("body.roles{*}.modelKey", "KEY")
+    body = {"roles": {"chat": {"modelKey": "x"}, "search": {"modelKey": "y", "other": 1}}}
+
+    replaced, count = substitute(body, substitution)
+
+    assert replaced == {
+        "roles": {"chat": {"modelKey": "KEY"}, "search": {"modelKey": "KEY", "other": 1}}
+    }
+    assert count == 2
+    assert substitution.path == ("roles", "{*}", "modelKey")
+    # The schema pointer of such a field has no segment for the key.
+    pointer = "/properties/roles/additionalProperties/properties/modelKey/type"
+    assert is_under_test(substitution, Mutation("body", "application/json", pointer))
+
+
+@pytest.mark.parametrize(
+    ("value", "generated", "expected"),
+    [
+        (False, True, False),
+        (False, "true", "true"),
+        (False, 1, 1),
+        (30, 5, 30),
+        (30, 0.5, 30),
+        (30, True, True),
+        (30, "5", "5"),
+        ("text", 5, 5),
+        ("text", None, None),
+    ],
+)
+def test_a_value_replaces_only_a_generated_value_of_its_own_type(
+    value: object, generated: object, expected: object
+) -> None:
+    replaced, _ = substitute({"field": generated}, Substitution("body", ("field",), value))
+
+    assert replaced == {"field": expected}
+
+
+def test_a_value_can_be_different_in_each_request() -> None:
+    name = Substitution.for_field("body.name", "contract-team-ab12-{case}")
+    fixed = Substitution.for_field("body.ownerId", "U1")
+
+    assert name.for_case(7).value == "contract-team-ab12-7"
+    assert name.for_case(8).value == "contract-team-ab12-8"
+    assert fixed.for_case(7) is fixed

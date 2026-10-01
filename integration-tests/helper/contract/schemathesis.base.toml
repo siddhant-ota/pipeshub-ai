@@ -54,4 +54,7 @@ status_code_conformance.enabled = true
 content_type_conformance.enabled = true
 response_schema_conformance.enabled = true
 positive_data_acceptance.enabled = true
+# The default list has no 3xx, so a redirect that the spec documents (OAuth authorize, SAML
+# sign-in) would count as "the API rejected a valid request".
+positive_data_acceptance.expected-statuses = ["2xx", "3xx", "401", "403", "404", "409", "429", "5xx"]
 negative_data_rejection.enabled = true

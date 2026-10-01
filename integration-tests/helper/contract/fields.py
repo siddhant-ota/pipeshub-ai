@@ -36,6 +36,8 @@ _STRUCTURED_BODIES = (
     "multipart/form-data",
 )
 _REF = "$ref"
+FILE_FORMAT = "binary"
+UUID_FORMAT = "uuid"
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,12 @@ class RequestField:
 
     name: str
     is_id: bool
+    # `format` of its schema: `uuid`, `binary` (a file of a multipart body), ... or "".
+    format: str = ""
+
+    @property
+    def is_file(self) -> bool:
+        return self.format == FILE_FORMAT
 
 
 def pointer_path(schema_pointer: str) -> tuple[str, ...]:
@@ -127,17 +135,31 @@ def _walk(
             spec, _inherit_description(schema, free_form), f"{path}{ANY_KEY}", name, refs
         )
     if name and _is_leaf(schema):
-        yield RequestField(path, _holds_an_id(name, schema))
+        yield RequestField(path, _holds_an_id(name, schema), str(schema.get("format") or ""))
+
+
+def _path_schemas(spec: dict[str, Any], operation: Operation) -> dict[str, dict[str, Any]]:
+    return {
+        parameter["name"]: resolve(spec, parameter.get("schema") or {})
+        for parameter in operation_parameters(spec, operation)
+        if parameter.get("in") == "path"
+    }
 
 
 def enumerated_path_parameters(spec: dict[str, Any], operation: Operation) -> frozenset[str]:
     """Path parameters whose values the spec lists. Schemathesis sends every one of them."""
     return frozenset(
-        parameter["name"]
-        for parameter in operation_parameters(spec, operation)
-        if parameter.get("in") == "path"
-        and resolve(spec, parameter.get("schema") or {}).get("enum") is not None
+        name
+        for name, schema in _path_schemas(spec, operation).items()
+        if schema.get("enum") is not None
     )
+
+
+def path_parameter_formats(spec: dict[str, Any], operation: Operation) -> dict[str, str]:
+    return {
+        name: str(schema.get("format") or "")
+        for name, schema in _path_schemas(spec, operation).items()
+    }
 
 
 def request_fields(spec: dict[str, Any], operation: Operation) -> list[RequestField]:

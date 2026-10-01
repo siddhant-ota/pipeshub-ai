@@ -89,6 +89,9 @@ details; `index.md` one level up adds the suites of a session together.
 only sent invalid requests, none was answered with 400 or 422, so nothing shows
 that they reached its validation (a stale ID answers 404 to everything).
 
+A 3xx answer counts as a success like a 2xx: for a sign-in redirect the 302 is
+what the spec documents. The run does not follow a redirect.
+
 "Incomplete" is also the verdict when a request was answered with 429. The rate
 limiter answered, not the operation, so the request says nothing about the spec.
 Lower the rate in the suite file (`rate_limit`, `operation_rate_limits`).
@@ -140,7 +143,8 @@ spec and fails, before any request is sent, when they do not agree.
 | `path_parameters` | The value key for each path parameter, for example `conversationId: conversation.mutable.id` |
 | `values` | Query and body fields that get a real value, for example `body.filters.kb[*]: knowledgeBase.id` |
 | `values_by_operation` | The same for one operation; it wins over `values` |
-| `constants` | Value keys whose value the suite file gives itself, for example `connector.type: Confluence` |
+| `constants` | Value keys whose value the suite file gives itself, for example `connector.type: Confluence`; a constant can be a number or `true`/`false` |
+| `headers` | The value key of a header that every request of an operation carries, for example `Accept` for a stream |
 | `client_chosen_ids` | ID fields whose value the client is free to choose, each with a reason |
 | `ids_without_fixture` | ID fields that must name something that exists and have no fixture, each with a reason |
 | `negative_only` | Operations that are only sent invalid requests, in groups with a reason each (a valid one calls the LLM, sends an email, ...) |
@@ -217,8 +221,30 @@ the gap would be invisible. Therefore:
 - If a fixture fails, its values are missing. The operations that need them are
   not sent and their tests fail with the reason; the rest still run.
 
-A value replaces a string that is already in the generated request. It is never
-added, and in an invalid request the field under test keeps its invalid value.
+A value replaces a generated value of its own type (text, number, boolean) that
+is already in the request. It is never added. In an invalid request the field
+under test keeps its invalid value, and every other field gets its value: the
+request must be invalid in one way only, or the API could reject it for a
+generated ID and the test would pass without showing that the API saw the
+invalid part.
+
+Three special values:
+
+- **A file.** For a file field of a multipart body (`format: binary`), the value
+  is the path of a file. The request then carries that file with its name, its
+  content and its type. Without one, Schemathesis sends an empty file named after
+  the form field, which no API that looks at the extension or the content accepts.
+- **`{case}`.** In a text value it becomes a number that is different in each
+  request: `contract-team-ab12-{case}`. Use it for a name that must be unique, so
+  that every valid create request can succeed, not only the first one.
+- **A field under a free-form key** is written `body.roles{*}.modelKey`.
+
+A value for a field that is not an ID has a price. The field is no longer sent
+with what Schemathesis generates for it, so the run cannot show that the spec
+allows a value that the API rejects (an empty name where the spec has no
+`minLength`). It is still the better choice when no valid request can succeed
+without it: a success is what shows the status code and the response body.
+Write the gap in the spec next to the value in the suite file.
 The value must be one that the spec allows for its field. Schemathesis looks at
 the request again once the value is in, and if the spec forbids the value (a
 pattern, a format, an enum) it counts the request as invalid. When the API then
@@ -228,6 +254,9 @@ No ID is taken from the response of an earlier request: that Schemathesis
 feature is off, so that a request does not depend on what ran before it.
 
 ### Roles
+
+Fixtures have module scope: what a suite created and changed is put back when
+its tests are done, before the next suite starts.
 
 Each fixture resource has a role, so that operations cannot disturb each other,
 in whatever order they run: `readonly` is only read, `mutable` is updated,
@@ -244,6 +273,12 @@ whether it was `added` for the contract tests or was an `existing`
 integration-test fixture. The report and the plan have a "Fixtures" section made
 from that list, with the value each key had in the run, or why it had none.
 A value marked `secret` (a token) is not shown, and no file of the run has it.
+
+The API answers with the secrets of the OAuth apps and access tokens that the
+test cases create. `redaction.py` masks the text under every field whose name
+ends in `secret`, `token`, `password`, `apiKey` and the like, in `events.ndjson`
+and `requests.har`, before anything reads them. The run deletes those apps and
+tokens at the end.
 
 ## How a run works
 

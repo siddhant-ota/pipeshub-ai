@@ -19,7 +19,7 @@ from helper.contract.suite import (
     PlannedOperation,
     Suite,
 )
-from helper.contract.values import PATH, ContractValues
+from helper.contract.values import PATH, ContractValues, Value, parse_field
 
 CONTRACT_DIR = Path(__file__).resolve().parent
 BASE_CONFIG_PATH = CONTRACT_DIR / "schemathesis.base.toml"
@@ -27,6 +27,8 @@ HOOKS_PATH = CONTRACT_DIR / "hooks.py"
 
 # Environment of the Schemathesis process, read by hooks.py.
 SUBSTITUTIONS_ENV = "CONTRACT_SUBSTITUTIONS"
+FILES_ENV = "CONTRACT_FILES"
+HEADERS_ENV = "CONTRACT_HEADERS"
 LOGINS_ENV = "CONTRACT_LOGINS"
 # The tokens that fixtures provide. In the environment, not in a file: they are credentials.
 TOKENS_ENV = "CONTRACT_TOKENS"
@@ -162,19 +164,50 @@ def _sent(suite: Suite, runs: list[OperationRun]) -> list[PlannedOperation]:
 
 def build_substitutions(
     suite: Suite, values: ContractValues, runs: list[OperationRun]
-) -> dict[str, dict[str, str]]:
+) -> dict[str, dict[str, Value]]:
     """Operation label -> request field -> value, for `hooks.py`."""
-    substitutions: dict[str, dict[str, str]] = {}
+    substitutions: dict[str, dict[str, Value]] = {}
     for planned in _sent(suite, runs):
         fields = {
             **{f"{PATH}.{name}": key for name, key in planned.path_values.items()},
-            **planned.field_values,
+            **{
+                name: key
+                for name, key in planned.field_values.items()
+                if name not in planned.file_fields
+            },
         }
         if fields:
             substitutions[planned.operation.label] = {
                 field_name: values.values[key] for field_name, key in fields.items()
             }
     return substitutions
+
+
+def build_files(
+    suite: Suite, values: ContractValues, runs: list[OperationRun]
+) -> dict[str, dict[str, str]]:
+    """Operation label -> form field of its multipart body -> path of the file to send in it."""
+    return {
+        planned.operation.label: {
+            parse_field(name)[1][0]: str(values.values[planned.field_values[name]])
+            for name in planned.file_fields
+        }
+        for planned in _sent(suite, runs)
+        if planned.file_fields
+    }
+
+
+def build_headers(
+    suite: Suite, values: ContractValues, runs: list[OperationRun]
+) -> dict[str, dict[str, str]]:
+    """Operation label -> the headers that the suite gives it."""
+    return {
+        planned.operation.label: {
+            name: str(values.values[key]) for name, key in planned.header_values.items()
+        }
+        for planned in _sent(suite, runs)
+        if planned.header_values
+    }
 
 
 def build_logins(suite: Suite, runs: list[OperationRun]) -> dict[str, str]:
@@ -185,7 +218,7 @@ def build_logins(suite: Suite, runs: list[OperationRun]) -> dict[str, str]:
 def build_tokens(suite: Suite, values: ContractValues, runs: list[OperationRun]) -> dict[str, str]:
     """Operation label -> the token a fixture provides for it."""
     return {
-        planned.operation.label: values.values[planned.token_key]
+        planned.operation.label: str(values.values[planned.token_key])
         for planned in _sent(suite, runs)
         if planned.auth == AUTH_TOKEN
     }

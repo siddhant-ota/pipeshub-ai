@@ -1,17 +1,15 @@
 """The pytest side of the contract tests, run for real but against a stub.
 
-The enterprise-search contract `conftest.py` and test module are copied into a
-throwaway pytest project. Its root conftest replaces the integration-test
-fixtures with fakes and points the run at a local stub API, so the whole path
-runs: values from fixtures, the Schemathesis run, one outcome per operation,
-the terminal summary and the cleanup.
+A small suite over four real operations of the spec is written into a throwaway
+pytest project, with fake clients, and pointed at a local stub API. So the
+whole path runs: values from fixtures, the Schemathesis run, one outcome per
+operation, the report, the terminal summary and the cleanup.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 import textwrap
@@ -23,13 +21,103 @@ import pytest
 pytestmark = [pytest.mark.unit, pytest.mark.slow]
 
 INTEGRATION_TESTS = Path(__file__).resolve().parents[1]
-CONTRACT_DIR = INTEGRATION_TESTS / "response-validation/enterprise-search/contract"
 
 # The stub answers `{}`. That satisfies the spec for the first, breaks it for the second.
 MATCHES = "PATCH /conversations/{conversationId}/archive"
 DIFFERS = "GET /search/{searchId}"
 SKIPPED = "DELETE /search"
-TEST_MODULE = "contract/integration_test_enterprise_search_contract.py"
+TEST_MODULE = "contract/integration_test_layer_contract.py"
+
+SUITE = r"""
+name: layer
+include_path_regex: "^/(conversations/\\{conversationId\\}/archive|search|search/\\{searchId\\})$"
+path_parameters:
+  defaults:
+    - path_prefix: /conversations
+      values:
+        conversationId: conversation.archivable.id
+    - path_prefix: /search
+      values:
+        searchId: search.readonly.id
+  operations:
+    deleteSearchById:
+      searchId: search.disposable.id
+skip:
+  - operation: deleteSearchHistory
+    reason: Deletes all search history of the user.
+  - operation: search
+    reason: Calls the LLM.
+"""
+
+SUITE_CONFTEST = """
+from pathlib import Path
+
+import pytest
+
+from helper.contract.pytest_support import delete_quietly, response_body, suite_fixtures
+from helper.contract.sources import ValueSource
+
+SUITE_PATH = Path(__file__).with_name("suite.yaml")
+ROLES = ("readonly", "disposable")
+
+
+@pytest.fixture(scope="module")
+def contract_conversation(conversations_client):
+    conversation = response_body(conversations_client.create(), (201,), "Create conversation")
+    try:
+        yield conversation["id"]
+    finally:
+        delete_quietly("conversation", lambda: conversations_client.delete(conversation["id"]))
+
+
+@pytest.fixture(scope="module")
+def contract_searches(search_client):
+    created = {}
+    try:
+        for role in ROLES:
+            created[role] = response_body(search_client.create(role), (200,), "Create search")["id"]
+        yield created
+    finally:
+        for search_id in created.values():
+            delete_quietly("search", lambda search_id=search_id: search_client.delete(search_id))
+
+
+VALUE_SOURCES = (
+    ValueSource(
+        "contract_conversation",
+        ("conversation.archivable.id",),
+        lambda conversation_id: (conversation_id,),
+        "One conversation, to archive.",
+    ),
+    ValueSource(
+        "contract_searches",
+        tuple(f"search.{role}.id" for role in ROLES),
+        lambda searches: tuple(searches[role] for role in ROLES),
+        "Two saved searches: to read and to delete.",
+    ),
+)
+
+contract_values, contract_run = suite_fixtures(SUITE_PATH, VALUE_SOURCES)
+"""
+
+SUITE_TEST_MODULE = """
+from pathlib import Path
+
+import pytest
+
+from helper.contract.outcome import assert_spec_matches_api
+from helper.contract.pytest_support import CONTRACT_MARKS, operation_params
+from helper.contract.suite import load_suite
+
+SUITE = load_suite(Path(__file__).with_name("suite.yaml"))
+
+pytestmark = CONTRACT_MARKS
+
+
+@pytest.mark.parametrize("operation_id", operation_params(SUITE))
+def test_spec_matches_api(operation_id, contract_run):
+    assert_spec_matches_api(contract_run.result_for(operation_id), contract_run.files.report)
+"""
 
 ROOT_CONFTEST = """
 import tomllib
@@ -65,76 +153,34 @@ class Response:
         return self._body
 
 
-def conversation(conversation_id):
-    messages = [{"_id": f"{conversation_id}-bot", "messageType": "bot_response"}]
-    return Response(201, {"conversation": {"_id": conversation_id, "messages": messages}})
+def deleted(what):
+    with DELETED.open("a") as log:
+        log.write(what + "\\n")
+    return Response(200, {})
 
 
 class Conversations:
-    count = 0
+    def create(self):
+        return Response(201, {"id": "conversation-1"})
 
-    def create_conversation(self, *args, **kwargs):
-        Conversations.count += 1
-        return conversation(f"conversation-{Conversations.count}")
-
-    def delete_conversation(self, *ids):
-        with DELETED.open("a") as log:
-            log.write("conversation " + " ".join(ids) + "\\n")
-        return Response(200, {})
-
-    def archive_conversation(self, *ids):
-        return Response(200, {})
-
-    def set_project(self, *ids):
-        return Response(200, {})
-
-
-class Agents:
-    def create_agent(self, **payload):
-        return Response(201, {"agent": {"_key": "agent-" + payload["name"].split("-")[1]}})
-
-    def delete_agent(self, key):
-        return Response(404, {})
+    def delete(self, conversation_id):
+        return deleted(f"conversation {conversation_id}")
 
 
 class Searches:
-    def search(self, query, **kwargs):
+    def create(self, role):
         if SEARCH_FAILS:
             return Response(404, {"error": "No documents are available"})
-        return Response(200, {"searchId": "search-" + query.split()[1]})
+        return Response(200, {"id": f"search-{role}"})
 
-    def delete_search(self, search_id):
-        with DELETED.open("a") as log:
-            log.write(f"search {search_id}\\n")
-        return Response(200, {})
-
-    def archive_search(self, search_id):
-        return Response(200, {})
-
-    def unarchive_search(self, search_id):
-        with DELETED.open("a") as log:
-            log.write(f"unarchive {search_id}\\n")
-        return Response(404, {})
-
-
-class Projects:
-    def create_project(self, name):
-        return Response(201, {"project": {"_id": "project-1"}})
-
-    def delete_project(self, project_id):
-        return Response(200, {})
-
-
-def deleted_by_path(method, path):
-    with DELETED.open("a") as log:
-        log.write(f"{method} {path}\\n")
-    return Response(200, {})
+    def delete(self, search_id):
+        return deleted(f"search {search_id}")
 
 
 @pytest.fixture(scope="session")
 def pipeshub_client():
     with stub_server() as url:
-        yield SimpleNamespace(base_url=url, request=deleted_by_path)
+        yield SimpleNamespace(base_url=url)
 
 
 @pytest.fixture(scope="session")
@@ -143,65 +189,22 @@ def conversations_client():
 
 
 @pytest.fixture(scope="session")
-def agent_conversations_client():
-    return Conversations()
-
-
-@pytest.fixture(scope="session")
-def agents_client():
-    return Agents()
-
-
-@pytest.fixture(scope="session")
 def search_client():
     return Searches()
-
-
-@pytest.fixture(scope="session")
-def projects_client():
-    return Projects()
-
-
-@pytest.fixture(scope="session")
-def ai_models_configured():
-    return None
-
-
-@pytest.fixture(scope="session")
-def session_kb():
-    return {"kb_id": "kb-1", "record_id": "record-1"}
-
-
-@pytest.fixture(scope="session")
-def reasoning_multimodal_llm_model():
-    return SimpleNamespace(model_key="key-1", model_name="model", provider="openAI")
-
-
-@pytest.fixture(scope="session")
-def agent_session():
-    return {"workhorse_agent": "agent-main"}
-
-
-@pytest.fixture(scope="session")
-def readonly_conversation():
-    return {"conversation_id": "conversation-readonly", "bot_message_id": "message-readonly"}
-
-
-@pytest.fixture(scope="session")
-def readonly_agent_conversation():
-    return {"conversation_id": "agent-conversation-readonly", "bot_message_id": "message-readonly"}
-
-
-@pytest.fixture(scope="session")
-def second_user():
-    return SimpleNamespace(user_id="user-2")
 """
 
 
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
     contract = tmp_path / "contract"
-    shutil.copytree(CONTRACT_DIR, contract, ignore=shutil.ignore_patterns("__pycache__"))
+    contract.mkdir()
+    for name, content in (
+        ("suite.yaml", SUITE),
+        ("conftest.py", SUITE_CONFTEST),
+        (Path(TEST_MODULE).name, SUITE_TEST_MODULE),
+        ("baseline.json", '{"format_version": 1, "findings": []}\n'),
+    ):
+        (contract / name).write_text(textwrap.dedent(content), encoding="utf-8")
     (tmp_path / "pytest.ini").write_text(
         "[pytest]\npython_files = integration_test_*.py\nmarkers =\n    contract: contract tests\n",
         encoding="utf-8",
@@ -253,34 +256,33 @@ def test_each_operation_gets_the_outcome_of_its_verdict(project: Path) -> None:
     assert "Traceback" not in output
 
     # The terminal summary names the gap that the suite declares.
-    assert "API contract: enterprise-search" in output
+    assert "API contract: layer" in output
     assert "Contract: DIFFERS — " in output
     assert f"Skipped: {SKIPPED} — Deletes all search history" in output
 
     # Only the selected operations were sent, with the values from the fixtures.
-    manifest = (project / "reports/enterprise-search/run/manifest.json").read_text(encoding="utf-8")
+    manifest = (project / "reports/layer/run/manifest.json").read_text(encoding="utf-8")
     assert manifest.count('"state": "full"') == 2
     values = json.loads(
-        (project / "reports/enterprise-search/run/substitutions.json").read_text(encoding="utf-8")
+        (project / "reports/layer/run/substitutions.json").read_text(encoding="utf-8")
     )
-    assert values[DIFFERS] == {"path.searchId": "search-readonly"}
-    assert values[MATCHES] == {"path.conversationId": "conversation-2"}, "the archivable one"
+    assert values == {
+        MATCHES: {"path.conversationId": "conversation-1"},
+        DIFFERS: {"path.searchId": "search-readonly"},
+    }
 
-    # The report says which fixtures gave the values, and which of them are new.
-    report = (project / "reports/enterprise-search/run/report.md").read_text(encoding="utf-8")
+    # The report says which fixtures gave the values, and with which value.
+    report = (project / "reports/layer/run/report.md").read_text(encoding="utf-8")
     assert "## Fixtures" in report
-    assert "| `contract_searches` | added |" in report
+    assert "| `contract_conversation` | added | One conversation, to archive. |" in report
     assert "`search.readonly.id` = `search-readonly`" in report
-    assert "| `session_kb` | existing |" in report
 
-    # The fixtures are deleted at the end: four conversations and four agent conversations by
-    # role, and the two that are linked to a project. A search is unarchived first, because
-    # the API does not delete an archived one.
-    deleted = (project / "deleted.txt").read_text(encoding="utf-8").splitlines()
-    assert sum(line.startswith("conversation ") for line in deleted) == 10
-    searches = [line for line in deleted if not line.startswith("conversation ")]
-    assert searches[:2] == ["unarchive search-readonly", "search search-readonly"]
-    assert len(searches) == 8
+    # The fixtures are torn down when the tests of the suite are done.
+    assert (project / "deleted.txt").read_text(encoding="utf-8").splitlines() == [
+        "search search-readonly",
+        "search search-disposable",
+        "conversation conversation-1",
+    ]
 
 
 def test_a_known_difference_is_an_expected_failure(project: Path) -> None:
