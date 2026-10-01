@@ -72,7 +72,6 @@ values:
   # takes any string for both.
   body.toolsetType: toolset.type
   body.authType: toolset.authType
-  body.oauthConfigId: oauthConfig.readonly.id
   # The API wants a name of at least one character, and a name only once for a
   # toolset type (409). Hidden by this value: the spec gives `instanceName`,
   # `toolsetType` and `authType` no `minLength`, so a generated request has
@@ -85,16 +84,16 @@ constants:
   # Jira is in the registry and supports API_TOKEN and OAUTH. The built-in
   # toolsets (calculator, ...) are internal: the API answers 404 for them.
   toolset.type: jira
-  # With API_TOKEN the API stores the instance and calls nothing. An OAUTH
-  # instance can come with a new OAuth configuration. The response names that
-  # one and a configuration of the fixtures in the same field
-  # (`instance.oauthConfigId`), so a cleanup rule for it would also delete what
-  # the request was linked to.
+  # With API_TOKEN the API stores the instance and does nothing else. With OAUTH
+  # it looks `oauthConfigId` up, or makes a new OAuth configuration from
+  # `authConfig`, which the test would have to delete too.
   toolset.authType: API_TOKEN
 
 client_chosen_ids:
   - field: body.auth.clientId
     reason: The client ID of an OAuth app at the third party; it names nothing in PipesHub.
+  - field: body.oauthConfigId
+    reason: Ignored for API_TOKEN, which every request of createToolsetInstance has (see `toolset.authType`); the API reads it only for OAUTH.
 
 ids_without_fixture:
   - field: body.auth.oauthAppId
@@ -119,6 +118,8 @@ no_success_response:
     reason: *no_route
   - operation: getToolsetOAuthUrl
     reason: *no_route
+  - operation: listConfiguredToolsets
+    reason: The API answers 500, which the spec does not list. The handler calls get_my_toolsets as a plain function, so `page` and `limit` are not numbers, and the paging fails (backend/python/app/api/routes/toolsets.py, get_configured_toolsets).
   - operation: authenticateToolsetInstance
     reason: &no_credentials The API wants the credentials in an `auth` object. The spec describes the body as a free-form object with no `auth` property, and a value can only replace what the spec has.
   - operation: authenticateAgentToolset

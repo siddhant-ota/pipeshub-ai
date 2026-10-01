@@ -210,16 +210,19 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         (
             "toolsetInstance.oauth.id",
             "toolsetInstance.oauthForAgent.id",
-            *(f"oauthConfig.{role}.id" for role in OAUTH_CONFIG_ROLES),
+            "oauthConfig.mutable.id",
+            "oauthConfig.disposable.id",
         ),
         lambda oauth: (
             oauth["instances"]["readonly"],
             oauth["instances"][_FOR_AGENT],
-            *(oauth["configs"][role] for role in OAUTH_CONFIG_ROLES),
+            oauth["configs"]["mutable"],
+            oauth["configs"]["disposable"],
         ),
-        "Three OAuth configurations of the Jira toolset with a made-up client ID and secret (to "
-        "read, to update, to delete), and three OAuth instances: two on the first configuration, "
-        "for the authorization URL of the user and of the agent, and one on the second.",
+        "Three OAuth configurations of the Jira toolset with a made-up client ID and secret, and "
+        "three OAuth instances: two on the first configuration, for the authorization URL of the "
+        "user and of the agent, and one on the second, which is there to be updated; the third "
+        "configuration has no instance and is there to be deleted.",
     ),
     ValueSource(
         "contract_new_instance_name",
