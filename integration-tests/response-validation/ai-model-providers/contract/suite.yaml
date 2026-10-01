@@ -44,7 +44,12 @@ path_parameters:
 values:
   # The stream ends only when the download is `ready` or `failed`. For a model
   # that the embedding server has never seen it reports `not_found` every three
-  # seconds until the client disconnects.
+  # seconds until the client disconnects, and the request timeout of the run is
+  # a timeout for each read, so such a request never ends.
+  # The fixture model is `failed` only in the memory of the embedding server: if
+  # that server restarts between the fixture and this operation, the run hangs.
+  # Hidden by this value: the spec has no pattern for `model`, and the API
+  # requires `^[\w.-]+(\/[\w.-]+)?$`.
   query.model: embeddingModel.failed.name
   # A model that does not exist: the embedding server answers 202 and the
   # download fails at the first lookup. With the model of the spec's example
@@ -52,11 +57,14 @@ values:
   # Hidden by this value: the spec has no pattern for `model`, and the API
   # requires `^[\w.-]+(\/[\w.-]+)?$`.
   body.model: embeddingModel.missing.name
-  # Not a real provider, on purpose. The API accepts some requests that the spec
-  # forbids (an unknown field, a wrong type in a `configuration` field that it
+  # Not a real provider, on purpose. The API accepts about 60 of the invalid
+  # requests of each operation (a wrong type in a `configuration` field that it
   # does not validate) and then runs the provider health check. With a provider
   # that the registry does not have, that check fails before any call to a model
-  # provider, and nothing is stored.
+  # provider, and nothing is stored. Nothing else stops these requests: for
+  # updateAIModelProvider the API takes every `configuration` key that a request
+  # leaves out from the stored model, so with the real provider such a request
+  # calls the provider with the stored credentials of `mutable`.
   body.provider: aiProvider.unknown.id
   # A request that the API accepts after all must not take the default from the
   # LLM of the organization.
@@ -98,14 +106,14 @@ negative_only:
   - reason: >-
       A request succeeds only with real credentials, and the API then calls the
       model provider three times (health check). It does that for each of the 87
-      valid requests and for about 64 invalid ones that it accepts, and every
+      valid requests and for about 60 invalid ones that it accepts, and every
       success adds a model.
     operations:
       - addAIModelProvider
   - reason: >-
       A request succeeds only with real credentials, and the API then calls the
       model provider three times (health check). It does that for each of the 87
-      valid requests and for about 64 invalid ones that it accepts.
+      valid requests and for about 60 invalid ones that it accepts.
     operations:
       - updateAIModelProvider
 

@@ -31,8 +31,12 @@ SUITE_PATH = Path(__file__).with_name("suite.yaml")
 
 # One model per role, so that an update, a delete, a change of the default or a role
 # assignment under test cannot disturb another operation, in whatever order they run.
-MODEL_ROLES = ("mutable", "disposable", "promotable", "assignable")
+PROMOTABLE = "promotable"
+MODEL_ROLES = ("mutable", "disposable", PROMOTABLE, "assignable")
 _MODEL_TYPE = "llm"
+# How `setup_test_llm_model` begins its error when the environment has no provider credentials.
+# Any other error of it means that a provider refused the model.
+_NO_CREDENTIALS = "No LLM provider credentials found"
 
 _AI_MODELS = "/api/v1/configurationManager/ai-models"
 _MODEL_ROLES = f"{_AI_MODELS}/roles"
@@ -58,10 +62,43 @@ def _default_llm_key(ai_models_client: AIModelsClient) -> str:
     )
 
 
+def _is_default_llm(ai_models_client: AIModelsClient, model_key: str) -> bool:
+    try:
+        return _default_llm_key(ai_models_client) == model_key
+    except (AssertionError, requests.RequestException, ValueError):
+        return False
+
+
+def _default_llm_is_back(
+    pipeshub_client: PipeshubClient, ai_models_client: AIModelsClient, model_key: str
+) -> bool:
+    """Make `model_key` the default LLM again. True only if the API then lists it as the default.
+
+    The API runs a provider health check on the model first, and changes nothing if it fails.
+    """
+    for _ in range(2):
+        if _is_default_llm(ai_models_client, model_key):
+            return True
+        restore_quietly(
+            "default LLM",
+            lambda: pipeshub_client.request(
+                "PUT",
+                f"{_AI_MODELS}/default/{_MODEL_TYPE}/{model_key}",
+                timeout=_HEALTH_CHECK_TIMEOUT_SEC,
+            ),
+        )
+    return _is_default_llm(ai_models_client, model_key)
+
+
 @pytest.fixture(scope="module")
 def contract_ai_models(
     pipeshub_client: PipeshubClient, ai_models_client: AIModelsClient
 ) -> Iterator[dict[str, SeededAIModel]]:
+    """One LLM per role. Skips without provider credentials; fails if a provider refuses.
+
+    The teardown fails if the LLM that was the default before is not the default again.
+    If no LLM was the default before, there is nothing to give back.
+    """
     default_before = _default_llm_key(ai_models_client)
     created: dict[str, SeededAIModel] = {}
     try:
@@ -69,28 +106,42 @@ def contract_ai_models(
             try:
                 created[role] = setup_test_llm_model(pipeshub_client, is_default=False)
             except RuntimeError as exc:
-                pytest.skip(f"No LLM could be added ({role}): {exc}")
+                if str(exc).startswith(_NO_CREDENTIALS):
+                    pytest.skip(str(exc))
+                raise
         yield created
     finally:
-        # setDefaultAIModel makes `promotable` the default LLM. The model that was the default
-        # gets that back before `promotable` is deleted; otherwise the API promotes the first
-        # LLM that is left. For a model that still is the default, this request changes nothing.
-        if default_before and created:
-            restore_quietly(
-                "default LLM",
-                lambda: pipeshub_client.request(
-                    "PUT",
-                    f"{_AI_MODELS}/default/{_MODEL_TYPE}/{default_before}",
-                    timeout=_HEALTH_CHECK_TIMEOUT_SEC,
-                ),
-            )
+        # setDefaultAIModel makes `promotable` the default LLM. The API deletes a default model
+        # by promoting the first LLM that is left, which need not be the one that was the
+        # default. So `promotable` is deleted only once the default is back where it was.
+        default_is_back = (
+            not default_before
+            or not created
+            or _default_llm_is_back(pipeshub_client, ai_models_client, default_before)
+        )
         for role, model in created.items():
-            delete_quietly(
-                f"LLM ({role})",
-                lambda model=model: ai_models_client.delete_provider(
-                    model.model_type, model.model_key
-                ),
+            if default_is_back or role != PROMOTABLE:
+                delete_quietly(
+                    f"LLM ({role})",
+                    lambda model=model: ai_models_client.delete_provider(
+                        model.model_type, model.model_key
+                    ),
+                )
+        if not default_is_back:
+            raise AssertionError(
+                f"The default LLM is not back. Before this suite it was the model {default_before}; "
+                "the API did not make it the default again (its provider health check must pass). "
+                f"The fixture model `{PROMOTABLE}` was not deleted and may still be the default: "
+                f"{created[PROMOTABLE].model_key if PROMOTABLE in created else 'not created'}."
             )
+
+
+def _roles_are(user_session_client: SessionClient, roles: dict[str, object]) -> bool:
+    try:
+        resp = user_session_client.request("GET", _MODEL_ROLES)
+        return resp.status_code == 200 and resp.json().get("modelRoles") == roles
+    except (requests.RequestException, ValueError, AttributeError):
+        return False
 
 
 @pytest.fixture(scope="module")
@@ -109,16 +160,19 @@ def contract_model_roles(
     ).get("modelRoles")
     assert isinstance(saved, dict), "Get the model roles: response has no modelRoles object"
 
-    def _put_back() -> requests.Response:
-        resp = user_session_client.request("GET", _MODEL_ROLES)
-        if resp.status_code == 200 and resp.json().get("modelRoles") == saved:
-            return resp
-        return user_session_client.request("PUT", _MODEL_ROLES, json={"roles": saved})
-
+    saved_json = json.dumps(saved, sort_keys=True)
     try:
-        yield json.dumps(saved, sort_keys=True)
+        yield saved_json
     finally:
-        restore_quietly("model roles", _put_back)
+        if not _roles_are(user_session_client, saved):
+            restore_quietly(
+                "model roles",
+                lambda: user_session_client.request("PUT", _MODEL_ROLES, json={"roles": saved}),
+            )
+            assert _roles_are(user_session_client, saved), (
+                f"The model roles are not back. Before this suite they were {saved_json}; "
+                "the API did not take them again, or did not answer."
+            )
 
 
 def _wait_until_download_failed(pipeshub_client: PipeshubClient, model: str) -> None:
@@ -147,11 +201,15 @@ def contract_failed_embedding_download(pipeshub_client: PipeshubClient) -> str:
     """
     # No such model is on the Hugging Face Hub, so the download fails at the first lookup.
     model = f"contract-failed-{uuid4().hex[:8]}"
-    response_body(
-        pipeshub_client.request("POST", _PREPARE_MODEL, json={"model": model}),
-        (202,),
-        f"Prepare the embedding model {model}",
-    )
+    resp = pipeshub_client.request("POST", _PREPARE_MODEL, json={"model": model})
+    # 403: the embedding server has a list of allowed models (EMBEDDING_SERVER_ALLOWED_MODELS).
+    # 500: the Node API could not reach the embedding server.
+    if resp.status_code in (403, 500):
+        pytest.skip(
+            "The embedding server of this deployment does not start a download for a model "
+            f"name of the test: HTTP {resp.status_code} {resp.text[:200]}"
+        )
+    response_body(resp, (202,), f"Prepare the embedding model {model}")
     _wait_until_download_failed(pipeshub_client, model)
     return model
 
