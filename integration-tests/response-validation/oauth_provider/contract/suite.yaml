@@ -1,0 +1,66 @@
+# Contract-test suite: PipesHub as an OAuth 2.0 provider (authorize, consent,
+# token, revoke, introspect, userinfo).
+# Routes: backend/nodejs/apps/src/modules/oauth_provider/routes/oauth.provider.routes.ts
+# The keys on the right-hand side (`oauthApp.clientId`, ...) are produced by
+# `contract_values` in conftest.py.
+#
+# Every client ID, client secret and token in a request belongs to an OAuth app
+# that a fixture creates for this suite. The client that the tests themselves
+# log in with is never named, so no request can revoke its tokens.
+
+name: oauth-provider
+
+include_path_regex: "^/oauth2(/|$)"
+
+# Query and body fields that get a real value wherever a request has them.
+values:
+  query.client_id: oauthApp.clientId
+  query.redirect_uri: oauthApp.redirectUri
+  query.scope: oauthApp.scope
+  body.client_id: oauthApp.clientId
+  body.client_secret: oauthApp.clientSecret
+  body.redirect_uri: oauthApp.redirectUri
+  body.scope: oauthApp.scope
+
+values_by_operation:
+  # Gap in the spec that this value hides: `state` has no `minLength`, so
+  # Schemathesis sends "". The API wants at least one character.
+  oauthAuthorizeConsent:
+    body.state: consent.state
+  # A token of the app that nothing else uses: the first valid request revokes it.
+  oauthRevoke:
+    body.token: oauthToken.disposable.accessToken
+  oauthIntrospect:
+    body.token: oauthToken.readonly.accessToken
+
+# Values that the suite file gives itself. The fixture registers the app with
+# the redirect URI and the scope.
+constants:
+  oauthApp.redirectUri: http://localhost/callback
+  # A client-credentials token never carries `openid` (the token endpoint drops
+  # the identity scopes), so the tokens that the test cases get have no scope.
+  oauthApp.scope: openid
+  consent.state: contract-state
+
+# ID fields whose value the client is free to choose. They keep the generated value.
+client_chosen_ids:
+  - field: query.nonce
+    reason: The client chooses the nonce; it names no existing resource.
+
+# Fields that must name something that exists, and for which no fixture gives a
+# value. They keep the generated value.
+ids_without_fixture:
+  - field: body.code
+    reason: >-
+      An authorization code works once, and using one again revokes the tokens
+      of its user and app.
+  - field: body.refresh_token
+    reason: A refresh token works once; the token endpoint replaces it on use.
+
+auth:
+  # The route takes only an OAuth access token that a user granted with the
+  # scope `openid` (oauth.auth.middleware.ts). Neither login of the run is one:
+  # not the session of the test user, and not the client-credentials token,
+  # which never carries `openid`.
+  oauthUserInfo:
+    token: oauthToken.readonly.accessToken

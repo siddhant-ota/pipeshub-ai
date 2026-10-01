@@ -1,0 +1,10 @@
+# Contract-test suite: OAuth and OpenID Connect discovery documents.
+# Routes: backend/nodejs/apps/src/modules/oauth_provider/routes/oid.provider.routes.ts
+#
+# The four operations are public GETs without parameters, served at the root of
+# the server and not under /api/v1; the spec says so (`servers` on each
+# operation). They need no login, no value and no fixture.
+
+name: oidc-discovery
+
+include_path_regex: "^/\\.well-known(/|$)"
