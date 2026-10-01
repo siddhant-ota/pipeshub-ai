@@ -1,0 +1,132 @@
+# Contract-test suite: toolsets (registry, instances, credentials, OAuth configurations).
+# Routes: backend/nodejs/apps/src/modules/toolsets/routes/toolsets_routes.ts
+# Every handler forwards to the connector service:
+# backend/python/app/api/routes/toolsets.py
+# The keys on the right-hand side (`toolsetInstance.mutable.id`, ...) are produced
+# by `contract_values` in conftest.py.
+
+name: toolsets
+
+include_path_regex: "^/toolsets(/|$)"
+
+# Value for each path parameter. `operations` wins over `defaults`; in
+# `defaults` the first matching path prefix wins.
+#
+# Roles keep the operations apart, in whatever order they run. An instance is
+# `readonly`, `mutable` (updated) or `disposable` (deleted by the DELETE
+# operation). The API stores credentials for each instance and owner (the user
+# or the agent), so each credential operation has an instance of its own:
+# `authenticated` has credentials to update, `revocable` has credentials to
+# remove, `reauthenticable` has credentials to clear, and `unauthenticated` has
+# none. `oauth` and `oauthForAgent` are linked to an OAuth configuration.
+path_parameters:
+  defaults:
+    - path_prefix: /toolsets/agents
+      values:
+        agentKey: agent.serviceAccount.key
+    - path_prefix: /toolsets
+      values:
+        toolsetType: toolset.type
+        instanceId: toolsetInstance.readonly.id
+        # The operations with `toolsetId` are from before instances, and an
+        # instance ID is the nearest real value. An instance of their own: a
+        # deployment that still had these routes would change or delete it.
+        toolsetId: toolsetInstance.legacy.id
+
+  operations:
+    updateToolsetInstance:
+      instanceId: toolsetInstance.mutable.id
+    deleteToolsetInstance:
+      instanceId: toolsetInstance.disposable.id
+    authenticateToolsetInstance:
+      instanceId: toolsetInstance.unauthenticated.id
+    updateToolsetCredentials:
+      instanceId: toolsetInstance.authenticated.id
+    removeToolsetCredentials:
+      instanceId: toolsetInstance.revocable.id
+    reauthenticateToolsetInstance:
+      instanceId: toolsetInstance.reauthenticable.id
+    getInstanceOAuthAuthorizationUrl:
+      instanceId: toolsetInstance.oauth.id
+
+    updateToolsetOAuthConfig:
+      oauthConfigId: oauthConfig.mutable.id
+    deleteToolsetOAuthConfig:
+      oauthConfigId: oauthConfig.disposable.id
+
+    authenticateAgentToolset:
+      instanceId: agentToolsetInstance.unauthenticated.id
+    updateAgentToolsetCredentials:
+      instanceId: agentToolsetInstance.authenticated.id
+    removeAgentToolsetCredentials:
+      instanceId: agentToolsetInstance.revocable.id
+    reauthenticateAgentToolset:
+      instanceId: agentToolsetInstance.reauthenticable.id
+    getAgentToolsetOAuthUrl:
+      instanceId: toolsetInstance.oauthForAgent.id
+
+# Query and body fields that get a real value wherever a request has them.
+values:
+  # Not IDs by their names, but they must name something that exists: a toolset
+  # type of the registry, and an auth type that the toolset supports. The spec
+  # takes any string for both.
+  body.toolsetType: toolset.type
+  body.authType: toolset.authType
+  body.oauthConfigId: oauthConfig.readonly.id
+  # The API wants a name of at least one character, and a name only once for a
+  # toolset type (409). Hidden by this value: the spec gives `instanceName`,
+  # `toolsetType` and `authType` no `minLength`, so a generated request has
+  # empty ones, and the API answers 400 to them (toolsets_routes.ts,
+  # createToolsetInstanceSchema).
+  body.instanceName: toolsetInstance.new.name
+
+# Values that the suite file gives itself.
+constants:
+  # Jira is in the registry and supports API_TOKEN and OAUTH. The built-in
+  # toolsets (calculator, ...) are internal: the API answers 404 for them.
+  toolset.type: jira
+  # With API_TOKEN the API stores the instance and calls nothing. An OAUTH
+  # instance can come with a new OAuth configuration. The response names that
+  # one and a configuration of the fixtures in the same field
+  # (`instance.oauthConfigId`), so a cleanup rule for it would also delete what
+  # the request was linked to.
+  toolset.authType: API_TOKEN
+
+client_chosen_ids:
+  - field: body.auth.clientId
+    reason: The client ID of an OAuth app at the third party; it names nothing in PipesHub.
+
+ids_without_fixture:
+  - field: body.auth.oauthAppId
+    reason: Only createToolset has it, and no request to that operation can succeed (see no_success_response).
+
+# Sent in full, but no request can get a 2xx. If one does, the test fails
+# ("Stale suite entry"), and the entry must go.
+no_success_response:
+  - operation: createToolset
+    reason: &no_route The connector service has no route for this path any more (toolsets became instances), so no request can succeed.
+  - operation: checkToolsetStatus
+    reason: *no_route
+  - operation: getToolsetConfig
+    reason: *no_route
+  - operation: saveToolsetConfig
+    reason: *no_route
+  - operation: updateToolsetConfig
+    reason: *no_route
+  - operation: deleteToolsetConfig
+    reason: *no_route
+  - operation: reauthenticateToolset
+    reason: *no_route
+  - operation: getToolsetOAuthUrl
+    reason: *no_route
+  - operation: authenticateToolsetInstance
+    reason: &no_credentials The API wants the credentials in an `auth` object. The spec describes the body as a free-form object with no `auth` property, and a value can only replace what the spec has.
+  - operation: authenticateAgentToolset
+    reason: *no_credentials
+
+# Resources that a successful test case creates; the test deletes them at the end.
+# `{id}` is the value at `id_pointer` in the response.
+created_resources:
+  - operation: createToolsetInstance
+    id_pointer: /instance/_id
+    delete_path: /toolsets/instances/{id}
