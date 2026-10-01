@@ -32,6 +32,13 @@ from helper.contract.results import (
     OperationResult,
 )
 from helper.contract.sources import FixtureRow
+from helper.contract.suite import (
+    PROFILE_EXAMPLES_ONLY,
+    PROFILE_FULL,
+    PROFILE_NEGATIVE_ONLY,
+    PROFILE_SKIP,
+    Suite,
+)
 
 _VERDICT_TEXT = {
     VERDICT_MISMATCH: (
@@ -117,11 +124,9 @@ def _finding_lines(finding: Finding) -> list[str]:
     return lines
 
 
-def _fixture_section(fixtures: list[FixtureRow], *, with_values: bool) -> list[str]:
-    """The fixtures of the suite: what each one is, and the values it gave."""
-    if not fixtures:
-        return []
-
+def _fixture_table(
+    fixtures: list[FixtureRow], *, with_values: bool, name_operations: bool = False
+) -> list[str]:
     def _values(row: FixtureRow) -> str:
         if not with_values:
             return ", ".join(f"`{key}`" for key in row.keys)
@@ -129,25 +134,32 @@ def _fixture_section(fixtures: list[FixtureRow], *, with_values: bool) -> list[s
             return f"**no value** — {row.problem}"
         return ", ".join(f"`{key}` = `{row.values.get(key, '')}`" for key in row.keys)
 
+    return _table(
+        ["Fixture", "Origin", "What it is", "Values", "Operations that use it"],
+        [
+            [
+                f"`{row.fixture}`",
+                "added" if row.added else "existing",
+                row.what,
+                _values(row),
+                ", ".join(row.operations) if name_operations else len(row.operations),
+            ]
+            for row in sorted(fixtures, key=lambda row: (not row.added, row.fixture))
+        ],
+    )
+
+
+def _fixture_section(fixtures: list[FixtureRow], *, with_values: bool) -> list[str]:
+    """The fixtures of the suite: what each one is, and the values it gave."""
+    if not fixtures:
+        return []
     return [
         "## Fixtures",
         "",
         "Where the real values in the requests come from. `added` is a fixture that was written",
         "for the contract tests; `existing` is one that the integration tests already had.",
         "",
-        *_table(
-            ["Fixture", "Origin", "What it is", "Values", "Operations that use it"],
-            [
-                [
-                    f"`{row.fixture}`",
-                    "added" if row.added else "existing",
-                    row.what,
-                    _values(row),
-                    len(row.operations),
-                ]
-                for row in sorted(fixtures, key=lambda row: (not row.added, row.fixture))
-            ],
-        ),
+        *_fixture_table(fixtures, with_values=with_values),
     ]
 
 
@@ -487,3 +499,90 @@ def write_plan(
     path = directory / "plan.md"
     path.write_text(render_plan(runs, ndjson_path, meta, fixtures), encoding="utf-8")
     return path
+
+
+_PROFILE_TEXT = {
+    PROFILE_FULL: "in full",
+    PROFILE_EXAMPLES_ONLY: "invalid requests and spec examples",
+    PROFILE_NEGATIVE_ONLY: "invalid requests only",
+    PROFILE_SKIP: "not sent",
+}
+
+
+def render_overview(suites: list[tuple[Suite, list[FixtureRow], str]]) -> str:
+    """One page that says, without a run, what every suite does: (suite, fixtures, folder).
+
+    It is for a person who checks the suites: which operations are limited and
+    why, and which fixtures exist and what they create.
+    """
+    planned = [operation for suite, _, _ in suites for operation in suite.operations]
+    profiles = Counter(operation.profile for operation in planned)
+    added = sum(row.added for _, rows, _ in suites for row in rows)
+    lines = [
+        "# API contract suites: what they do",
+        "",
+        "Made from the suite files and their fixtures; no run is needed for it.",
+        "",
+        f"- Suites: {len(suites)}",
+        f"- Operations: {len(planned)} — "
+        + ", ".join(f"{profiles[profile]} {text}" for profile, text in _PROFILE_TEXT.items()),
+        f"- Operations that are sent and declare that no request can succeed: "
+        f"{sum(bool(operation.no_success_reason) for operation in planned)}",
+        f"- Fixtures: {sum(len(rows) for _, rows, _ in suites)} ({added} added for the contract tests)",
+        "",
+        *_table(
+            ["Suite", "Folder", "Operations", *_PROFILE_TEXT.values(), "Fixtures"],
+            [
+                [
+                    suite.name,
+                    f"`{folder}`",
+                    len(suite.operations),
+                    *(
+                        sum(operation.profile == profile for operation in suite.operations) or ""
+                        for profile in _PROFILE_TEXT
+                    ),
+                    len(rows),
+                ]
+                for suite, rows, folder in suites
+            ],
+        ),
+    ]
+    for suite, rows, folder in suites:
+        limited = [op for op in suite.operations if op.profile != PROFILE_FULL]
+        no_success = [op for op in suite.operations if op.no_success_reason]
+        logins = Counter(op.auth for op in suite.operations if op.profile != PROFILE_SKIP)
+        lines += [
+            f"## {suite.name}",
+            "",
+            f"`{folder}` — {len(suite.operations)} operations. Logins: "
+            + ", ".join(f"{count} {login}" for login, count in sorted(logins.items()))
+            + ".",
+            "",
+            "### Operations that are not run in full",
+            "",
+            *_table(
+                ["Operation", "operationId", "How it is run", "Why"],
+                [
+                    [
+                        f"`{op.operation.label}`",
+                        op.operation.operation_id,
+                        _PROFILE_TEXT[op.profile],
+                        op.reason,
+                    ]
+                    for op in limited
+                ],
+            ),
+            "### Operations that are sent, and for which no request can succeed",
+            "",
+            *_table(
+                ["Operation", "operationId", "Why"],
+                [
+                    [f"`{op.operation.label}`", op.operation.operation_id, op.no_success_reason]
+                    for op in no_success
+                ],
+            ),
+            "### Fixtures",
+            "",
+            *_fixture_table(rows, with_values=False, name_operations=True),
+        ]
+    return "\n".join(lines)

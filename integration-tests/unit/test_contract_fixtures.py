@@ -13,9 +13,10 @@ import pytest
 
 from helper.contract.baseline import load_baseline
 from helper.contract.pytest_support import TEST_MODULE_GLOB
+from helper.contract.report import render_overview
 from helper.contract.runner import BASELINE_NAME, SUITES_ROOT, suite_paths
 from helper.contract.sources import fixture_rows, load_value_sources
-from helper.contract.suite import load_suite
+from helper.contract.suite import PROFILE_FULL, load_suite
 
 pytestmark = pytest.mark.unit
 
@@ -68,3 +69,25 @@ def test_every_suite_has_its_test_module(suite_path: Path) -> None:
         f"integration_test_{name}_contract.py"
     ]
     assert suite_path.with_name(BASELINE_NAME).exists()
+
+
+def test_the_overview_names_every_suite_with_its_limits_and_fixtures() -> None:
+    entries = [
+        (
+            load_suite(suite_path),
+            fixture_rows(load_suite(suite_path), load_value_sources(suite_path)),
+            _suite_id(suite_path),
+        )
+        for suite_path in SUITES
+    ]
+
+    overview = render_overview(entries)
+
+    for suite, rows, _ in entries:
+        assert f"## {suite.name}" in overview
+        assert all(f"`{row.fixture}`" in overview for row in rows)
+        assert all(
+            planned.reason in overview
+            for planned in suite.operations
+            if planned.profile != PROFILE_FULL
+        )

@@ -5,6 +5,7 @@
     python -m helper.contract accept <suite.yaml>   # make the baseline say what the last run found
     python -m helper.contract index                 # one page for the last run of every suite
     python -m helper.contract suites                # which suite has which operations
+    python -m helper.contract overview              # one page: limited operations and fixtures
 
 The run itself is a pytest test: `pytest -m contract`.
 """
@@ -17,7 +18,7 @@ from collections import Counter
 from pathlib import Path
 
 from helper.contract.baseline import BaselineError, write_baseline
-from helper.contract.report import render_index
+from helper.contract.report import render_index, render_overview
 from helper.contract.runner import (
     BASELINE_NAME,
     INDEX_PATH,
@@ -33,7 +34,8 @@ from helper.contract.spec import all_operations, load_spec
 from helper.contract.suite import PROFILE_SKIP, SuiteError, load_suite
 
 _FOR_ONE_SUITE = ("plan", "report", "accept")
-_FOR_ALL_SUITES = ("index", "suites")
+_FOR_ALL_SUITES = ("index", "suites", "overview")
+OVERVIEW_NAME = "overview.md"
 
 
 def baseline_path(suite_path: Path) -> Path:
@@ -52,6 +54,18 @@ def _index() -> Path:
         raise RunnerError(f"No run of any suite found in {REPORTS_DIR}.")
     INDEX_PATH.write_text(render_index(runs), encoding="utf-8")
     return INDEX_PATH
+
+
+def _overview() -> Path:
+    entries = []
+    for suite_path in suite_paths():
+        suite = load_suite(suite_path)
+        rows = fixture_rows(suite, load_value_sources(suite_path))
+        entries.append((suite, rows, str(suite_path.parent.relative_to(INTEGRATION_TESTS_DIR))))
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    overview = REPORTS_DIR / OVERVIEW_NAME
+    overview.write_text(render_overview(entries), encoding="utf-8")
+    return overview
 
 
 def _suites() -> None:
@@ -100,6 +114,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "suites":
             _suites()
+            return 0
+        if args.command == "overview":
+            print(f"Overview: {_overview()}")
             return 0
         suite = load_suite(args.suite)
         if args.command == "plan":

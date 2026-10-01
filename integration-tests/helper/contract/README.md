@@ -64,6 +64,7 @@ python -m helper.contract report $SUITE   # write the report of the last run aga
 python -m helper.contract accept $SUITE   # make baseline.json say what the last run found
 python -m helper.contract index           # one page for the last run of every suite
 python -m helper.contract suites          # which suite has which operations
+python -m helper.contract overview        # one page: every limited operation and every fixture
 ```
 
 ## Reading the result
