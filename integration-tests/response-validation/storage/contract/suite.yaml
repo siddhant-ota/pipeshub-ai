@@ -1,0 +1,92 @@
+# Contract-test suite: the internal document-storage routes (service-to-service).
+# Routes: backend/nodejs/apps/src/modules/storage/routes/storage.routes.ts
+# The keys on the right-hand side (`document.readonly.id`, ...) are produced by
+# `contract_values` in conftest.py.
+#
+# The routes write to the storage backend that the deployment is configured
+# with (local, S3 or Azure Blob), the one that knowledge-base uploads use. The
+# suite does not change that setting. It touches only its own documents: those
+# of its fixtures, in one folder named `contract-<8 hex chars>`, and those that
+# its test cases create, named `contract-placeholder-<number>`.
+#
+# The global rate limiter of the API leaves `/internal/` paths out, so the
+# suite needs no rate of its own.
+
+name: storage
+
+include_path_regex: "^/document(/|$)"
+
+# Roles keep the operations apart, in whatever order they run: `readonly` is
+# only read (it has two versions, so that `version=0` and `version=1` exist),
+# `mutable` gets new bytes, `versioned` gets new versions, `rollback` has three
+# versions to roll back between, `placeholder` has no file yet and gets an
+# upload link, and `disposable` is marked deleted by the DELETE operation.
+path_parameters:
+  defaults:
+    - path_prefix: /document/internal
+      values:
+        documentId: document.readonly.id
+
+  operations:
+    internalUpdateDocumentBuffer:
+      documentId: document.mutable.id
+    internalUploadNextVersion:
+      documentId: document.versioned.id
+    internalRollBackToPreviousVersion:
+      documentId: document.rollback.id
+    internalDirectUpload:
+      documentId: document.placeholder.id
+    internalDeleteDocumentById:
+      documentId: document.disposable.id
+
+values:
+  # A real `.txt` file, with its name and content type. A new version must have
+  # the extension of the document, and the fixture documents are `.txt` files.
+  body.file: file.text.path
+  # Gap in the spec that this value hides: `documentName` has no `minLength`, so
+  # Schemathesis sends "". The API cannot save a document without a name and
+  # answers 500 (documentName is `required` in document.schema.ts).
+  body.documentName: document.created.name
+
+constants:
+  document.created.name: contract-placeholder-{case}
+
+client_chosen_ids:
+  - field: body.customMetadata[*].key
+    reason: The name of a metadata entry. The caller makes it up; it names no existing resource.
+
+# The spec accepts only `scopedToken` for these routes: a JWT with the scope
+# `storage:token`, signed with the scoped JWT secret of the deployment. A
+# fixture makes one from SCOPED_JWT_SECRET.
+auth:
+  internalUploadDocument: {token: storage.token}
+  internalCreatePlaceholderDocument: {token: storage.token}
+  internalGetDocumentById: {token: storage.token}
+  internalDeleteDocumentById: {token: storage.token}
+  internalDownloadDocument: {token: storage.token}
+  internalGetDocumentBuffer: {token: storage.token}
+  internalUpdateDocumentBuffer: {token: storage.token}
+  internalUploadNextVersion: {token: storage.token}
+  internalRollBackToPreviousVersion: {token: storage.token}
+  internalDirectUpload: {token: storage.token}
+  internalIsDocumentModified: {token: storage.token}
+
+# Sent in full. The API turns every request down in its validation, before it
+# stores a file or a document record.
+no_success_response:
+  - operation: internalUploadDocument
+    reason: >-
+      The API requires the form fields `documentName` and `isVersionedFile`. The
+      spec does not list them, so no generated request has them, and a value
+      cannot add a field.
+
+# What a successful test case creates. The DELETE marks the document deleted;
+# the API has no route that removes the record or a stored file.
+created_resources:
+  - operation: internalCreatePlaceholderDocument
+    id_pointer: /_id
+    delete_path: /document/internal/{id}/
+  # No success is expected, but the backend can accept a request that the spec forbids.
+  - operation: internalUploadDocument
+    id_pointer: /_id
+    delete_path: /document/internal/{id}/
