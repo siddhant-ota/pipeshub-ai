@@ -99,7 +99,9 @@ limiter answered, not the operation, so the request says nothing about the spec.
 Lower the rate in the suite file (`rate_limit`, `operation_rate_limits`).
 
 If Schemathesis stops before the end, for example because the API stops
-answering, the whole run is an error and nothing is judged.
+answering, the whole run is an error and nothing is judged. The same when it
+does not finish in two hours (`CONTRACT_RUN_TIMEOUT_SEC`): a response stream
+that never ends would otherwise block the session for ever.
 
 A run with no failure can still leave things unchecked. The terminal summary
 and the "Coverage gaps" section of the report list every such operation and why.

@@ -57,6 +57,11 @@ REPORTS_DIR = Path(
 # One page for the last run of every suite.
 INDEX_PATH = REPORTS_DIR / "index.md"
 
+# How long one Schemathesis run may take. The request timeout of the config is the time
+# between two reads, so a stream that sends an event every few seconds and never ends
+# would never hit it, and the test session would wait for ever.
+RUN_TIMEOUT_SEC = int(os.getenv("CONTRACT_RUN_TIMEOUT_SEC") or 2 * 60 * 60)
+
 # 0: every check passed. 1: some failed. Anything else: Schemathesis could not run.
 _COMPLETED_EXIT_CODES = (0, 1)
 # `stop_reason` of a run in which every selected operation went through every phase.
@@ -194,14 +199,21 @@ def _run_schemathesis(suite: Suite, files: RunFiles, *, api_url: str, env: dict[
         "--no-color",
     ]
     with open(files.log, "w", encoding="utf-8") as log:
-        code = subprocess.run(
-            command,
-            cwd=files.directory,
-            env={**os.environ, **env},
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            check=False,
-        ).returncode
+        try:
+            code = subprocess.run(
+                command,
+                cwd=files.directory,
+                env={**os.environ, **env},
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=False,
+                timeout=RUN_TIMEOUT_SEC,
+            ).returncode
+        except subprocess.TimeoutExpired as exc:
+            raise RunnerError(
+                f"Schemathesis did not finish in {RUN_TIMEOUT_SEC // 60} minutes and was "
+                f"stopped. A response that never ends does this. Log: {files.log}"
+            ) from exc
     if code not in _COMPLETED_EXIT_CODES:
         tail = mask_text("\n".join(files.log.read_text(encoding="utf-8").splitlines()[-30:]))
         raise RunnerError(f"Schemathesis exited with code {code}. Log: {files.log}\n{tail}")

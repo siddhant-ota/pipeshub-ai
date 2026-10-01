@@ -184,6 +184,21 @@ def test_a_run_that_stopped_early_is_not_judged(
         runner._run_schemathesis(suite, files, api_url="http://stub", env={})
 
 
+def test_a_run_that_does_not_end_is_stopped(
+    suite: Suite, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stream that never ends would never hit the request timeout, which is between reads."""
+
+    def never_ends(command: list[str], **kwargs: object) -> SimpleNamespace:
+        raise runner.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(runner, "_schemathesis_command", lambda: "schemathesis")
+    monkeypatch.setattr(runner.subprocess, "run", never_ends)
+
+    with pytest.raises(runner.RunnerError, match="did not finish in 120 minutes"):
+        runner._run_schemathesis(suite, runner.RunFiles(tmp_path), api_url="http://stub", env={})
+
+
 def test_a_new_run_discards_the_results_of_the_one_before(tmp_path: Path) -> None:
     """Otherwise a run that fails to start would be judged, and cleaned up, with old results."""
     files = runner.RunFiles(tmp_path)
