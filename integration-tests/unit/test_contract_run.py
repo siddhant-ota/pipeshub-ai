@@ -8,6 +8,8 @@ which is everything the contract tests read from it.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +33,7 @@ from helper.contract.config import (
 )
 from helper.contract.created import Leftover, created_resources
 from helper.contract.events import read_cases
+from helper.contract.stub_server import stub_server
 from helper.contract.suite import AUTH_NONE, AUTH_SESSION, Suite, load_suite
 from helper.contract.values import ContractValues
 
@@ -447,3 +450,24 @@ def test_a_path_value_leaves_the_invalid_path_of_a_negative_case_alone(
 
     assert valid == {"llm"}
     assert about_the_path and "llm" not in about_the_path
+
+
+def test_a_redirect_is_recorded_and_not_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 302 is what the spec documents. Its target can be any host a request names."""
+    followed = tmp_path / "followed"
+
+    @contextmanager
+    def redirecting_stub() -> Iterator[str]:
+        with stub_server() as target, stub_server(redirect_to=f"{target}/followed") as url:
+            yield url
+            # The second stub answers 200 to anything, so a followed redirect would show as 200.
+            followed.write_text(target)
+
+    monkeypatch.setattr(runner, "stub_server", redirecting_stub)
+
+    cases = _path_cases(tmp_path, monkeypatch)
+
+    assert followed.exists()
+    assert {case.status for case in cases} == {302}

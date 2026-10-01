@@ -136,7 +136,12 @@ def _mutation(case: schemathesis.Case, location: str) -> Mutation | None:
 
 
 @schemathesis.hook
-def before_call(ctx: schemathesis.HookContext, case: schemathesis.Case, **kwargs: Any) -> None:
+def before_call(
+    ctx: schemathesis.HookContext, case: schemathesis.Case, kwargs: dict[str, Any]
+) -> None:
+    # A redirect is the answer to check: the spec documents the 302. Following it would judge
+    # the response of another page, and send a request to wherever a generated URL points.
+    kwargs.setdefault("allow_redirects", False)
     substitutions = _SUBSTITUTIONS.get(case.operation.label, ())
     # Read before anything is replaced: Schemathesis looks at a changed request again, and may
     # then describe it differently.
