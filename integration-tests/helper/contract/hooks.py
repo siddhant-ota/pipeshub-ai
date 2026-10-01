@@ -17,6 +17,7 @@ import schemathesis
 from schemathesis.transport import SerializationContext
 from schemathesis.transport.prepare import prepare_body
 from schemathesis.transport.requests import multipart_serializer
+from schemathesis.transport.serialization import Binary
 
 # `helper.*` is a namespace package rooted at integration-tests/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -199,6 +200,30 @@ def _send_real_files(
     ]
 
 
+def _holds_a_file(value: Any) -> bool:
+    if isinstance(value, bytes | Binary):
+        return True
+    if isinstance(value, dict):
+        return any(_holds_a_file(item) for item in value.values())
+    return isinstance(value, list) and any(_holds_a_file(item) for item in value)
+
+
+def _keep_the_label_of_a_file_body(case: schemathesis.Case) -> None:
+    """Keep the valid/invalid label of a body that holds a file, after a value went into it.
+
+    When a hook changed a body, Schemathesis validates it again, and it calls every body with
+    bytes in it invalid without a look at the schema. A valid upload with a value in one of
+    its text fields would then count as an invalid request that the API accepted. So the
+    mark that the body was changed is taken off again.
+    """
+    meta = case._meta  # noqa: SLF001
+    if meta is None or not _holds_a_file(case.body):
+        return
+    for location in meta.components:
+        if _name(location) == BODY:
+            meta.clear_dirty(location)
+
+
 @schemathesis.hook
 def before_call(
     ctx: schemathesis.HookContext, case: schemathesis.Case, kwargs: dict[str, Any]
@@ -232,5 +257,7 @@ def before_call(
         replaced, count = substitute(getattr(case, attribute), substitution)
         if count:
             setattr(case, attribute, replaced)
+            if substitution.location == BODY:
+                _keep_the_label_of_a_file_body(case)
     # After the values: the file parts are built from the body, with the other fields of the form.
     _send_real_files(case, kwargs, body_mutation)

@@ -713,3 +713,7 @@ def test_a_form_field_next_to_a_real_file_gets_its_value(
     with_metadata = [case for case in with_file if 'name="files_metadata"' in case.request_body]
     assert with_metadata
     assert all("contract-metadata" in case.request_body for case in with_metadata)
+    # Schemathesis calls a changed body with a file in it invalid, whatever its schema says.
+    # The hook keeps the label that the case had, or a good upload would count as an invalid
+    # request that the API accepted.
+    assert any(not case.is_negative for case in with_metadata)
