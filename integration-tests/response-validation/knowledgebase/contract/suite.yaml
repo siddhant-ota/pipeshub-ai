@@ -1,0 +1,147 @@
+# Contract-test suite: knowledge bases, their folders, records and permissions,
+# the Knowledge Hub browse API, and the demo-data switches.
+# Routes: backend/nodejs/apps/src/modules/knowledge_base/routes/kb.routes.ts,
+# mounted at /api/v1/knowledgeBase. Most handlers forward to the Python connector
+# service: app/connectors/sources/localKB/api/kb_router.py and knowledge_hub_router.py,
+# app/connectors/api/router.py (records, stream, reindex), app/modules/demo_data/router.py.
+# The keys on the right-hand side (`knowledgeBase.mutable.id`, ...) are produced
+# by `contract_values` in conftest.py.
+
+name: knowledge-base
+
+include_path_regex: "^/(knowledgeBase|kb)(/|$)"
+
+# Value for each path parameter. `operations` wins over `defaults`; in
+# `defaults` the first matching path prefix wins.
+#
+# Roles keep the operations apart, in whatever order they run: `readonly` is
+# only read, `mutable` is updated, `disposable` is deleted by the DELETE
+# operation. The mutable knowledge base also holds the folders and records that
+# the folder and record operations change; each of those has its own role.
+# `target` receives what the create operations make.
+path_parameters:
+  defaults:
+    - path_prefix: /knowledgeBase
+      values:
+        kbId: knowledgeBase.mutable.id
+        folderId: folder.mutable.id
+        recordId: record.mutable.id
+        parentId: knowledgeBase.readonly.id
+        # One `parentId` cannot be an app, a record group, a folder and a record
+        # at once, and the API answers 400 when the two do not fit. So every
+        # valid request browses the readonly knowledge base as an `app`.
+        parentType: hub.parentType
+    # The gateway does not mount /api/v1/kb: the route exists only in the Python
+    # connector service. Every request is answered 404, so the run reports the
+    # operation as "Unverified". That is a finding, not a gap of the suite: the
+    # spec has an operation that the API does not serve. Do not hide it with
+    # `no_success_response`.
+    - path_prefix: /kb
+      values:
+        recordId: record.mutable.id
+
+  operations:
+    getKnowledgeBase:
+      kbId: knowledgeBase.readonly.id
+    deleteKnowledgeBase:
+      kbId: knowledgeBase.disposable.id
+
+    createFolder:
+      kbId: knowledgeBase.target.id
+    deleteFolder:
+      folderId: folder.disposable.id
+    uploadRecords:
+      kbId: knowledgeBase.target.id
+
+    getRecordById:
+      recordId: record.readonly.id
+    streamRecordBuffer:
+      recordId: record.readonly.id
+    deleteRecord:
+      recordId: record.disposable.id
+    moveRecord:
+      recordId: record.movable.id
+    # An empty folder is a record too. The indexing service skips a folder, and
+    # this one has no children, so a valid request starts no indexing job.
+    reindexRecord:
+      recordId: folder.reindexable.id
+    reindexRecordGroup:
+      recordGroupId: recordGroup.absentId
+
+    listKBPermissions:
+      kbId: knowledgeBase.sharedReadonly.id
+    createKBPermission:
+      kbId: knowledgeBase.unshared.id
+    updateKBPermissions:
+      kbId: knowledgeBase.shared.id
+    deleteKBPermissions:
+      kbId: knowledgeBase.revocable.id
+
+# Query and body fields that get a real value wherever a request has them.
+# Loading the suite fails unless every field that holds an ID is in `values`,
+# `client_chosen_ids` or `ids_without_fixture`. A field applies to each
+# operation that has it.
+values:
+  # createFolder and uploadRecords: a folder of the target knowledge base.
+  query.folderId: folder.parent.id
+  # A knowledge base is an app of the Knowledge Hub; its ID is a connector ID there.
+  query.connectorIds: knowledgeBase.readonly.id
+  body.newParentId: folder.moveTarget.id
+  # The Mongo ID of the user, which the API resolves to the graph user itself.
+  body.userIds[*]: user.grantee.id
+  body.teamIds[*]: team.grantee.id
+  # A real `.txt` file, so that a valid request can really upload.
+  # uploadRecords: an upload creates a record in the target knowledge base and
+  # starts its indexing. The answer is a stream, not JSON, so `created_resources`
+  # cannot name the record: it is deleted with the target knowledge base.
+  # One generated valid request has a file, so a run uploads once. The other
+  # valid requests send `files: []` (the spec has no `minItems`), and the API
+  # answers 400.
+  body.files[*]: file.text.path
+  # Hides a gap in the spec: its example for `files_metadata` has `last_modified`
+  # as a date string, and the API takes only a number (uploadRecordsSchema).
+  # Every generated request carries that example, so no upload could succeed.
+  body.files_metadata: upload.filesMetadata
+  # updateRecord: each accepted request with the file replaces the file of the
+  # mutable record, names the record after the file and starts its indexing again.
+  body.file: file.text.path
+
+# Values that the suite file gives itself.
+constants:
+  hub.parentType: app
+  # One entry, for the one file of a request. `file_path` gives the record its
+  # name; a path with folders in it would create them.
+  upload.filesMetadata: '[{"file_path":"contract-upload.txt","last_modified":1700000000000}]'
+  # Only a synced connector has record groups (a knowledge base is an app, not
+  # a record group), and no fixture creates a connector. A well-formed ID that
+  # names nothing keeps an invalid request that the API accepts from starting
+  # a reindex.
+  recordGroup.absentId: "00000000-0000-4000-8000-000000000000"
+
+# Value keys an operation needs that go into no request: the fixture saves the
+# setting before the run and puts it back when the tests of the suite are done.
+requires:
+  setDemoDataPreference:
+    - demoData.preference.saved
+  setDemoDataForEveryone:
+    - demoData.workspace.saved
+
+# Only invalid requests are sent. The backend must reject them before it acts.
+# The success response of these operations is not checked.
+negative_only:
+  - reason: >-
+      A valid request for a real record group reindexes every record in it, which calls
+      the embedding model and the LLM. No fixture creates a record group: only a synced
+      connector has them.
+    operations:
+      - reindexRecordGroup
+
+# Resources that a successful test case creates; the test deletes them at the end.
+# `{id}` is the value at `id_pointer` in the response; other `{...}` are value keys.
+created_resources:
+  - operation: createKnowledgeBase
+    id_pointer: /id
+    delete_path: /knowledgeBase/{id}
+  - operation: createFolder
+    id_pointer: /id
+    delete_path: /knowledgeBase/{knowledgeBase.target.id}/folder/{id}
