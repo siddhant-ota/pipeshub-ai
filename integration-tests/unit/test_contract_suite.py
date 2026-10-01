@@ -255,6 +255,19 @@ def test_a_value_for_one_operation_wins_over_the_value_for_the_suite(tmp_path: P
     assert by_id["createThing"].field_values["body.ownerId"] == "user.id"
 
 
+def test_an_operation_can_need_a_value_that_goes_into_no_request(tmp_path: Path) -> None:
+    """For example a fixture that saves a setting first and puts it back at the end."""
+    suite = load_suite(
+        write_suite(tmp_path, requires={"createThing": ["settings.saved"]}),
+        SPEC,
+    )
+    by_id = {planned.operation.operation_id: planned for planned in suite.operations}
+
+    assert "settings.saved" in by_id["createThing"].value_keys
+    assert "settings.saved" not in by_id["createThing"].field_values.values()
+    assert "settings.saved" in suite.fixture_keys
+
+
 def test_a_constant_is_a_value_that_needs_no_fixture(tmp_path: Path) -> None:
     suite = load_suite(
         write_suite(

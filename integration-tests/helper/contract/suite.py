@@ -67,10 +67,13 @@ class PlannedOperation:
     token_key: str = ""
     # For example `10/m`, for an operation with a stricter limit than the rest of the API.
     rate_limit: str = ""
+    # Value keys that must exist for the operation to be sent, and that go into no request:
+    # a fixture that saves a setting and puts it back, or one that prepares the deployment.
+    required_keys: tuple[str, ...] = ()
 
     @property
     def value_keys(self) -> set[str]:
-        keys = {*self.path_values.values(), *self.field_values.values()}
+        keys = {*self.path_values.values(), *self.field_values.values(), *self.required_keys}
         return keys | {self.token_key} if self.token_key else keys
 
 
@@ -193,6 +196,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
     without_fixture = _fields_by_name(raw, _WITHOUT_FIXTURE)
     logins: dict[str, Any] = raw.get("auth") or {}
     rate_limits: dict[str, str] = raw.get("operation_rate_limits") or {}
+    requires: dict[str, list[str]] = raw.get("requires") or {}
 
     referenced = {
         *profiles,
@@ -200,6 +204,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
         *values_by_operation,
         *logins,
         *rate_limits,
+        *requires,
         *((raw.get("path_parameters") or {}).get("operations") or {}),
         *(entry["operation"] for entry in raw.get("created_resources") or []),
     }
@@ -277,6 +282,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
                 auth=auth,
                 token_key=token_key,
                 rate_limit=str(rate_limits.get(operation_id) or ""),
+                required_keys=tuple(requires.get(operation_id) or ()),
             )
         )
 
