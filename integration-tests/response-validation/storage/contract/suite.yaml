@@ -57,7 +57,8 @@ client_chosen_ids:
 
 # The spec accepts only `scopedToken` for these routes: a JWT with the scope
 # `storage:token`, signed with the scoped JWT secret of the deployment. A
-# fixture makes one from SCOPED_JWT_SECRET.
+# fixture makes one from SCOPED_JWT_SECRET. Without that variable the fixture
+# skips, and every operation of the suite with it.
 auth:
   internalUploadDocument: {token: storage.token}
   internalCreatePlaceholderDocument: {token: storage.token}
@@ -81,7 +82,8 @@ no_success_response:
       cannot add a field.
 
 # What a successful test case creates. The DELETE marks the document deleted;
-# the API has no route that removes the record or a stored file.
+# the API has no route that removes the record or a stored file, so the records
+# stay in MongoDB.
 created_resources:
   - operation: internalCreatePlaceholderDocument
     id_pointer: /_id

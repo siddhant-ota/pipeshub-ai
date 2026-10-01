@@ -23,6 +23,13 @@ values:
   # error ("Method not found"). `ping` gets a JSON-RPC result. The SDK answers it
   # itself: it calls no tool and no PipesHub API. No generated request can call a
   # tool, because none has the method `tools/call`.
+  #
+  # What the transport does comes from the code of @modelcontextprotocol/sdk
+  # 1.27.1 (server/webStandardStreamableHttp.js), not from a run: a request
+  # with an `id` is answered with 200 and an event stream that ends after the
+  # one response; a message without an `id` is answered with 202. If another
+  # version of the SDK leaves the stream open, each such request waits for the
+  # 60 s timeout, and the verdict of the operation is "Incomplete".
   body.method: mcp.method
 
 constants:

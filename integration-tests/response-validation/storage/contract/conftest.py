@@ -5,8 +5,10 @@
 
 The internal storage routes refuse every user login. They take a service token
 signed with the scoped JWT secret of the deployment, so the fixtures need
-SCOPED_JWT_SECRET and are skipped without it. The token and the requests are
-those of the storage integration tests (`integration-tests/storage`).
+SCOPED_JWT_SECRET. Without it they skip, and all 11 operations of the suite are
+skipped with that reason. With a secret that the deployment does not accept they
+fail, and the operations fail with them. The token and the requests are those of
+the storage integration tests (`integration-tests/storage`).
 """
 
 from __future__ import annotations
@@ -128,7 +130,9 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         ("storage.token",),
         lambda token: (token,),
         "A storage service token (scope `storage:token`, valid for one hour) for the organization "
-        "and the user of the OAuth client, signed with SCOPED_JWT_SECRET. It creates nothing.",
+        "and the user of the OAuth client, signed with SCOPED_JWT_SECRET. It creates nothing. "
+        "Without the secret it skips, and all 11 operations with it; a secret that the "
+        "deployment answers with 401 makes it fail.",
         secret=True,
     ),
     ValueSource(
@@ -138,7 +142,9 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         "Six documents in one folder `contract-<8 hex chars>`. Four are uploaded text files: one "
         "with two versions to read, one to get new bytes, one to get a new version, and one with "
         "three versions to roll back. Two are records without a file: one to get an upload link, "
-        "one to delete. At the end all six are marked deleted; their files stay in the storage.",
+        "one to delete. At the end all six are marked deleted. The API removes nothing: the "
+        "six records stay in MongoDB, and the files of the four uploaded documents, with every "
+        "version, stay in the storage of the deployment (local, S3 or Azure Blob).",
     ),
     ValueSource(
         "contract_text_file",

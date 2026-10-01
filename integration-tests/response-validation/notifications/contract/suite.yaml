@@ -17,7 +17,15 @@ include_path_regex: "^/notifications(/|$)"
 # One notification per operation, so that they cannot disturb each other in
 # whatever order they run: `archivable` is archived by the archive operation,
 # `archived` already is for the unarchive operation, and `disposable` is
-# dismissed by the DELETE operation.
+# dismissed by the DELETE operation. Each of these operations has one valid
+# request. Its invalid requests have an ID that is no ObjectId, which the
+# validator rejects, so none of them uses the notification up first.
+#
+# No route creates a notification. The fixture gets them from the bulk-invite
+# upload of user management, which the API refuses without SMTP settings
+# (`smtpConfigCheck`) and to an organization that is an `individual` account
+# (`accountTypeCheck`). On such a deployment the fixture skips, and these five
+# operations with it.
 path_parameters:
   operations:
     markInAppNotificationRead:
@@ -43,8 +51,20 @@ constants:
   notification.wellFormedCursor: eyJjIjoiMjk5OS0wMS0wMVQwMDowMDowMC4wMDBaIiwiaSI6ImZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZiJ9
 
 # `PATCH /notifications/read-all` marks every unread notification of the user
-# as read, not only the ones of this suite. The fixture behind this key reads
-# which ones are unread first, and marks them unread again at the end.
+# as read, not only the ones of this suite. The fixture behind the first key
+# reads which ones are unread first, and marks them unread again at the end.
 requires:
   markAllInAppNotificationsRead:
     - notification.unreadBefore.count
+  # `smtp.settings` says in the report whether the deployment had SMTP settings
+  # or got those of the test environment, which then stay.
+  markInAppNotificationRead:
+    - smtp.settings
+  markInAppNotificationUnread:
+    - smtp.settings
+  archiveInAppNotification:
+    - smtp.settings
+  unarchiveInAppNotification:
+    - smtp.settings
+  dismissInAppNotification:
+    - smtp.settings
