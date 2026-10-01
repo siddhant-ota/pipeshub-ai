@@ -1,0 +1,133 @@
+# Contract-test suite: AI models (providers, default model, roles, registry, embedding download).
+# Routes: backend/nodejs/apps/src/modules/configuration_manager/routes/cm_routes.ts
+# (`/aiModelsConfig` and `/ai-models/...`; the handlers are in controller/cm_controller.ts).
+# The registry routes and the provider health check forward to the query service
+# (backend/python/app/api/routes/ai_models_registry.py, health.py); the embedding download
+# routes forward to the embedding server (backend/python/app/embedding_main.py).
+# The keys on the right-hand side (`aiModel.mutable.key`, ...) are produced
+# by `contract_values` in conftest.py.
+
+name: ai-models
+
+include_path_regex: "^/configurationManager/(ai-models|aiModelsConfig)(/|$)"
+
+# Value for each path parameter. `operations` wins over `defaults`; in
+# `defaults` the first matching path prefix wins.
+#
+# The AI model configuration belongs to the whole organization, and the other
+# suites use its default LLM. So the operations that write get models of their
+# own, one per role: `mutable` is updated, `disposable` is deleted,
+# `promotable` is made the default LLM, and `assignable` gets a role. No
+# operation gets the key of a model that the suite did not add.
+#
+# A model key belongs to one model type; with another type the API answers 400.
+# So these operations get the type of their model, and not each value of the enum.
+# An invalid `modelType` is still sent.
+path_parameters:
+  defaults:
+    - path_prefix: /configurationManager/ai-models/registry
+      values:
+        providerId: aiProvider.registered.id
+
+  operations:
+    updateAIModelProvider:
+      modelType: aiModel.type
+      modelKey: aiModel.mutable.key
+    deleteAIModelProvider:
+      modelType: aiModel.type
+      modelKey: aiModel.disposable.key
+    setDefaultAIModel:
+      modelType: aiModel.type
+      modelKey: aiModel.promotable.key
+
+# Query and body fields that get a value wherever a request has them.
+values:
+  # The stream ends only when the download is `ready` or `failed`. For a model
+  # that the embedding server has never seen it reports `not_found` every three
+  # seconds until the client disconnects.
+  query.model: embeddingModel.failed.name
+  # A model that does not exist: the embedding server answers 202 and the
+  # download fails at the first lookup. With the model of the spec's example
+  # (`BAAI/bge-m3`) it would download about 2.3 GB.
+  # Hidden by this value: the spec has no pattern for `model`, and the API
+  # requires `^[\w.-]+(\/[\w.-]+)?$`.
+  body.model: embeddingModel.missing.name
+  # Not a real provider, on purpose. The API accepts some requests that the spec
+  # forbids (an unknown field, a wrong type in a `configuration` field that it
+  # does not validate) and then runs the provider health check. With a provider
+  # that the registry does not have, that check fails before any call to a model
+  # provider, and nothing is stored.
+  body.provider: aiProvider.unknown.id
+  # A request that the API accepts after all must not take the default from the
+  # LLM of the organization.
+  body.isDefault: aiModel.notDefault
+  # A role is given to a model of a type. Hidden by the second value: the spec
+  # allows any text for `modelType`, and the API accepts nine values.
+  body.roles{*}.modelKey: aiModel.assignable.key
+  body.roles{*}.modelType: aiModel.type
+
+values_by_operation:
+  addAIModelProvider:
+    # If the API stores a model after all, it is an LLM, which `created_resources` can delete.
+    body.modelType: aiModel.type
+
+# Values that the suite file gives itself.
+constants:
+  aiModel.type: llm
+  aiModel.notDefault: false
+  aiProvider.registered.id: openAI
+  aiProvider.unknown.id: contract-no-such-provider
+  embeddingModel.missing.name: contract-no-such-embedding-model
+
+# ID fields that must name something that exists, and for which no fixture
+# gives a value. They keep the generated value.
+ids_without_fixture:
+  - field: body.configuration.apiKey
+    reason: A credential of a model provider. With a real one, every request that the API accepts makes it call the provider.
+  - field: body.configuration.awsAccessKeyId
+    reason: A credential of a model provider. With a real one, every request that the API accepts makes it call the provider.
+  - field: body.configuration.awsAccessSecretKey
+    reason: A credential of a model provider. With a real one, every request that the API accepts makes it call the provider.
+  - field: body.configuration.organizationId
+    reason: An account ID at the model provider. It belongs to the credentials, which get no real value.
+  - field: body.configuration.project
+    reason: An account ID at the model provider. It belongs to the credentials, which get no real value.
+
+# Only invalid requests are sent. The success response of these operations is not checked.
+negative_only:
+  - reason: >-
+      A request succeeds only with real credentials, and the API then calls the
+      model provider three times (health check). It does that for each of the 87
+      valid requests and for about 64 invalid ones that it accepts, and every
+      success adds a model.
+    operations:
+      - addAIModelProvider
+  - reason: >-
+      A request succeeds only with real credentials, and the API then calls the
+      model provider three times (health check). It does that for each of the 87
+      valid requests and for about 64 invalid ones that it accepts.
+    operations:
+      - updateAIModelProvider
+
+# Resources that a successful test case creates; the test deletes them at the end.
+# `{id}` is the value at `id_pointer` in the response; other `{...}` are value keys.
+created_resources:
+  # Negative-only, but the API can accept a request that the spec forbids.
+  - operation: addAIModelProvider
+    id_pointer: /details/modelKey
+    delete_path: /configurationManager/ai-models/providers/{aiModel.type}/{id}
+
+# Value keys an operation needs that go into no request.
+requires:
+  # Saves the role assignments and puts them back. GET /ai-models/roles returns
+  # all that PUT /ai-models/roles takes.
+  updateModelRoles:
+    - modelRoles.saved
+
+skip:
+  - operation: createAIModelsConfig
+    reason: >-
+      One accepted request replaces the whole AI model configuration of the
+      organization: every model, with its credentials, and the role assignments.
+      No API returns the credentials, so nothing can put them back, and the
+      other suites lose their LLM and their embedding model.
