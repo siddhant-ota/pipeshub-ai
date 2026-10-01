@@ -1,11 +1,14 @@
-# Contract-test suite: enterprise search (conversations, semantic search, agents).
+# Contract-test suite: enterprise search (conversations, semantic search, agents,
+# projects, chat speech).
 # Routes: backend/nodejs/apps/src/modules/enterprise_search/routes/es.routes.ts
+#         (the chat speech routes are `createChatSpeechRouter` in the same file)
+#         backend/nodejs/apps/src/modules/projects/routes/project.routes.ts
 # The keys on the right-hand side (`conversation.mutable.id`, ...) are produced
 # by `contract_values` in conftest.py.
 
 name: enterprise-search
 
-include_path_regex: "^/(conversations|search|agents)(/|$)"
+include_path_regex: "^/(conversations|search|agents|projects|chat)(/|$)"
 
 # Value for each path parameter. `operations` wins over `defaults`; in
 # `defaults` the first matching path prefix wins.
@@ -15,6 +18,12 @@ include_path_regex: "^/(conversations|search|agents)(/|$)"
 # operation, `archived` is already archived for the unarchive operation,
 # `linked` is already in a project for the project-visibility operation, and
 # `disposable` is deleted by the DELETE operation.
+#
+# Projects have more: `pinnable` is there to be pinned and `pinned` already is,
+# `kbHost` gets its hidden knowledge base from the operation under test, and
+# `membersReadonly`, `membersMutable` and `membersDisposable` are the same three
+# roles for the member list of a project. `project.id` is the project that the
+# linked conversations are in; no project operation changes it.
 path_parameters:
   defaults:
     - path_prefix: /agents
@@ -29,6 +38,10 @@ path_parameters:
     - path_prefix: /search
       values:
         searchId: search.readonly.id
+    - path_prefix: /projects
+      values:
+        projectId: project.readonly.id
+        memberUserId: user.second.id
 
   operations:
     getConversationById:
@@ -64,6 +77,34 @@ path_parameters:
     deleteAgentConversationById:
       conversationId: agentConversation.disposable.id
 
+    deleteConversationChatAttachment:
+      recordId: attachment.disposable.id
+    deleteAgentConversationChatAttachment:
+      recordId: agentAttachment.disposable.id
+
+    updateProject:
+      projectId: project.mutable.id
+    deleteProject:
+      projectId: project.disposable.id
+    archiveProject:
+      projectId: project.archivable.id
+    unarchiveProject:
+      projectId: project.archived.id
+    pinProject:
+      projectId: project.pinnable.id
+    unpinProject:
+      projectId: project.pinned.id
+    getProjectConversations:
+      projectId: project.id
+    ensureProjectKnowledgeBase:
+      projectId: project.kbHost.id
+    listProjectMembers:
+      projectId: project.membersReadonly.id
+    upsertProjectMembers:
+      projectId: project.membersMutable.id
+    removeProjectMember:
+      projectId: project.membersDisposable.id
+
 # Query and body fields that get a real value wherever a request has them.
 # Loading the suite fails unless every field that holds an ID is in `values`,
 # `client_chosen_ids` or `ids_without_fixture`. A field applies to each
@@ -86,6 +127,29 @@ values:
   body.knowledge[*].connectorId: knowledgeBase.id
   body.knowledge[*].filters.records[*]: knowledgeBase.recordId
   body.recordIds[*]: record.wellFormedId
+  # The spec has no length limit for an item of `knowledgeScope`; the API wants 1
+  # to 200 characters (project.validators.ts). Schemathesis sends an empty one,
+  # so without the value no valid request with a scope could succeed. The value
+  # hides that gap in the spec.
+  body.knowledgeScope.kb[*]: knowledgeBase.id
+  body.knowledgeScope.apps[*]: knowledgeBase.id
+  body.members[*].principalId: user.second.id
+  # A real file for each file of an attachment upload. Without it Schemathesis
+  # sends empty files with no content type, and the API answers 400 to those.
+  body.files[*]: attachment.file.path
+
+# The same for one operation; it wins over `values` and the two lists of IDs.
+values_by_operation:
+  # For an agent, `tools` must name tools that exist (`ids_without_fixture`). A
+  # project stores the names as they come (project.validators.ts), so here every
+  # name is valid and a rejection must be judged. The spec has no length limit
+  # for a name; the API wants 1 to 200 characters. Schemathesis sends empty
+  # names, so without the value no valid request with `tools` could succeed.
+  # The value hides that gap in the spec.
+  createProject:
+    body.tools[*]: project.toolName
+  updateProject:
+    body.tools[*]: project.toolName
 
 # Values that the suite file gives itself.
 constants:
@@ -94,22 +158,32 @@ constants:
   # A well-formed one keeps the field from being the reason the API rejects an
   # invalid request, which would hide whether it rejects the invalid part.
   record.wellFormedId: "000000000000000000000000"
+  project.toolName: contract.tool
 
 # ID fields whose value the client is free to choose. They keep the generated
 # value, and a request with one is judged like any other.
 client_chosen_ids:
   - field: body.runId
     reason: The client chooses the run ID; it names no existing resource.
+  - field: body.conversationId
+    reason: >-
+      An upload does not look the conversation up. The API returns the ID as it
+      got it (backend/python/app/api/routes/chatbot.py, upload_chat_attachments).
 
 # ID fields that must name something that exists, and for which no fixture
 # gives a value. They keep the generated value, so a valid request with one
 # names nothing real. If the API rejects it, that is not counted as a
 # difference; the report says how many such requests there were.
 ids_without_fixture:
+  # Only the operations that call the LLM have these two, and they are sent
+  # invalid requests only. The API checks the form of an attachment reference,
+  # not that the attachment exists (es_validators.ts, attachmentRefSchema), so a
+  # real ID changes no rejection. In an invalid request that the API accepts, a
+  # real ID would put the file into the LLM turn.
   - field: body.attachments[*].recordId
-    reason: Needs an uploaded chat attachment. The upload operations are skipped.
+    reason: A real attachment would change no rejection, and add its file to an LLM turn.
   - field: body.attachments[*].virtualRecordId
-    reason: Needs an uploaded chat attachment. The upload operations are skipped.
+    reason: A real attachment would change no rejection, and add its file to an LLM turn.
   - field: body.tools[*]
     reason: Needs a configured toolset instance, which the fixtures do not create.
   - field: body.toolsets[*].instanceId
@@ -143,6 +217,42 @@ examples_only:
     operations:
       - search
 
+# Sent in full, and still no request can get a 2xx.
+no_success_response:
+  - operation: synthesizeChatSpeech
+    reason: >-
+      The operation is sent only to a deployment with no text-to-speech provider
+      (see `requires`), and without one the API answers 409 to a valid request.
+  - operation: transcribeChatAudio
+    reason: >-
+      The operation is sent only to a deployment with no speech-to-text provider
+      (see `requires`), and without one the API answers 409 to a valid request.
+
+# How an operation logs in, where the login that the spec gives must not be used.
+auth:
+  # The operation deletes every search of the caller that is not archived, and
+  # those that others shared with the caller (es_controller.ts,
+  # deleteSearchHistory). With the OAuth client that is the search fixtures of
+  # the operations after it. The second user owns one search, which a fixture
+  # makes for this operation, and no search is shared with that user.
+  deleteSearchHistory:
+    token: user.second.token
+
+# Values that an operation needs and that go into no request.
+requires:
+  # With a provider, a valid request calls it and costs money. So does an invalid
+  # one: the API takes an unknown `format` as mp3 and clamps `speed`, it does not
+  # reject them (backend/python/app/api/routes/speech.py). The fixture behind the
+  # key fails when a provider is configured, and the operation is then not sent.
+  synthesizeChatSpeech:
+    - speech.tts.provider
+  transcribeChatAudio:
+    - speech.stt.provider
+  # An empty list matches the spec whatever a conversation in it looks like, so
+  # the project must have the linked conversations in it.
+  getProjectConversations:
+    - conversation.linked.id
+
 # Resources that a successful test case creates; the test deletes them at the end.
 # `{id}` is the value at `id_pointer` in the response; other `{...}` are value keys.
 created_resources:
@@ -152,6 +262,9 @@ created_resources:
   - operation: search
     id_pointer: /searchId
     delete_path: /search/{id}
+  - operation: createProject
+    id_pointer: /project/_id
+    delete_path: /projects/{id}
   # Negative-only, but the backend can accept a request that the spec forbids.
   - operation: createConversation
     id_pointer: /conversation/_id
@@ -159,15 +272,24 @@ created_resources:
   - operation: createAgentConversation
     id_pointer: /conversation/_id
     delete_path: /agents/{agent.main.key}/conversations/{id}
-
-skip:
-  - operation: deleteSearchHistory
-    reason: Deletes all search history of the user, which removes the search fixtures.
-  - operation: uploadConversationChatAttachments
-    reason: Multipart file upload. Needs a file fixture.
-  - operation: deleteConversationChatAttachment
-    reason: Needs an uploaded attachment fixture.
-  - operation: uploadAgentConversationChatAttachments
-    reason: Multipart file upload. Needs a file fixture.
-  - operation: deleteAgentConversationChatAttachment
-    reason: Needs an uploaded attachment fixture.
+  # An upload answers with one attachment for each file, and takes 10 files at most.
+  - {operation: uploadConversationChatAttachments, id_pointer: /attachments/0/recordId, delete_path: "/conversations/attachments/{id}"}
+  - {operation: uploadConversationChatAttachments, id_pointer: /attachments/1/recordId, delete_path: "/conversations/attachments/{id}"}
+  - {operation: uploadConversationChatAttachments, id_pointer: /attachments/2/recordId, delete_path: "/conversations/attachments/{id}"}
+  - {operation: uploadConversationChatAttachments, id_pointer: /attachments/3/recordId, delete_path: "/conversations/attachments/{id}"}
+  - {operation: uploadConversationChatAttachments, id_pointer: /attachments/4/recordId, delete_path: "/conversations/attachments/{id}"}
+  - {operation: uploadConversationChatAttachments, id_pointer: /attachments/5/recordId, delete_path: "/conversations/attachments/{id}"}
+  - {operation: uploadConversationChatAttachments, id_pointer: /attachments/6/recordId, delete_path: "/conversations/attachments/{id}"}
+  - {operation: uploadConversationChatAttachments, id_pointer: /attachments/7/recordId, delete_path: "/conversations/attachments/{id}"}
+  - {operation: uploadConversationChatAttachments, id_pointer: /attachments/8/recordId, delete_path: "/conversations/attachments/{id}"}
+  - {operation: uploadConversationChatAttachments, id_pointer: /attachments/9/recordId, delete_path: "/conversations/attachments/{id}"}
+  - {operation: uploadAgentConversationChatAttachments, id_pointer: /attachments/0/recordId, delete_path: "/agents/{agent.main.key}/conversations/attachments/{id}"}
+  - {operation: uploadAgentConversationChatAttachments, id_pointer: /attachments/1/recordId, delete_path: "/agents/{agent.main.key}/conversations/attachments/{id}"}
+  - {operation: uploadAgentConversationChatAttachments, id_pointer: /attachments/2/recordId, delete_path: "/agents/{agent.main.key}/conversations/attachments/{id}"}
+  - {operation: uploadAgentConversationChatAttachments, id_pointer: /attachments/3/recordId, delete_path: "/agents/{agent.main.key}/conversations/attachments/{id}"}
+  - {operation: uploadAgentConversationChatAttachments, id_pointer: /attachments/4/recordId, delete_path: "/agents/{agent.main.key}/conversations/attachments/{id}"}
+  - {operation: uploadAgentConversationChatAttachments, id_pointer: /attachments/5/recordId, delete_path: "/agents/{agent.main.key}/conversations/attachments/{id}"}
+  - {operation: uploadAgentConversationChatAttachments, id_pointer: /attachments/6/recordId, delete_path: "/agents/{agent.main.key}/conversations/attachments/{id}"}
+  - {operation: uploadAgentConversationChatAttachments, id_pointer: /attachments/7/recordId, delete_path: "/agents/{agent.main.key}/conversations/attachments/{id}"}
+  - {operation: uploadAgentConversationChatAttachments, id_pointer: /attachments/8/recordId, delete_path: "/agents/{agent.main.key}/conversations/attachments/{id}"}
+  - {operation: uploadAgentConversationChatAttachments, id_pointer: /attachments/9/recordId, delete_path: "/agents/{agent.main.key}/conversations/attachments/{id}"}

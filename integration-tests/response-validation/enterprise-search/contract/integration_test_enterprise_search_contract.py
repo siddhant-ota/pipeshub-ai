@@ -1,8 +1,9 @@
 """Contract tests for enterprise search: the OpenAPI spec must describe what the API does.
 
 Schemathesis generates requests from ``pipeshub-openapi.yaml`` for every
-operation under ``/conversations``, ``/search`` and ``/agents`` and sends them
-once (``contract_run``). Each test below reads the result for one operation.
+operation under ``/conversations``, ``/search``, ``/agents``, ``/projects`` and
+``/chat`` and sends them once (``contract_run``). Each test below reads the
+result for one operation.
 
 The API is the reference. A test fails when the spec and the API differ in a
 way that ``baseline.json`` does not list, when the baseline lists a difference
