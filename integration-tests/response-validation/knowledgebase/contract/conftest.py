@@ -239,21 +239,36 @@ def contract_demo_data_preference(kb_client: KBClient) -> Iterator[str]:
     try:
         yield json.dumps(chosen)
     finally:
-        restore_quietly(
+        put_back = restore_quietly(
             "the demo data choice of the caller",
             lambda: kb_client.put("/demo-data/preference", json={"include": chosen}),
+        )
+        assert put_back, (
+            "The contract run changed the demo data choice of the caller and could not put "
+            f"it back. Set it by hand: PUT {_KB_PATH}/demo-data/preference "
+            f"{json.dumps({'include': chosen})}"
         )
 
 
 @pytest.fixture(scope="module")
-def contract_demo_data_workspace(kb_client: KBClient) -> Iterator[str]:
+def contract_demo_data_workspace(kb_client: KBClient) -> Iterator[bool]:
+    """Whether the demo data is on for the organization. Every valid request writes this value.
+
+    The teardown writes it once more, for the case that the API accepted another value
+    against the spec.
+    """
     enabled = _demo_data_status(kb_client).get("offForEveryone") is not True
     try:
-        yield json.dumps(enabled)
+        yield enabled
     finally:
-        restore_quietly(
+        put_back = restore_quietly(
             "the demo data setting of the organization",
             lambda: kb_client.put("/demo-data/workspace", json={"enabled": enabled}),
+        )
+        assert put_back, (
+            "The contract run could not put the demo data setting of the organization back. "
+            f"Set it by hand: PUT {_KB_PATH}/demo-data/workspace "
+            f"{json.dumps({'enabled': enabled})}"
         )
 
 
@@ -331,11 +346,13 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
     ),
     ValueSource(
         "contract_demo_data_workspace",
-        ("demoData.workspace.saved",),
-        lambda saved: (saved,),
-        "Creates nothing. Reads whether the demo data is on for the organization before the "
-        "run and writes that back after the suite, which also sets the sign-in of the sample "
-        "accounts to match.",
+        ("demoData.workspace.enabled",),
+        lambda enabled: (enabled,),
+        "Creates nothing. Reads whether the demo data is on for the organization. Every valid "
+        "request of setDemoDataForEveryone writes that same value, and the fixture writes it "
+        "once more after the suite. Each such write sets the sign-in of all sample accounts "
+        "(`@acme-demo.example`) to the organization flag, also of one that an admin had set "
+        "differently.",
     ),
 )
 

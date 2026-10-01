@@ -6,6 +6,11 @@
 # app/connectors/api/router.py (records, stream, reindex), app/modules/demo_data/router.py.
 # The keys on the right-hand side (`knowledgeBase.mutable.id`, ...) are produced
 # by `contract_values` in conftest.py.
+#
+# What a run costs: 10 indexing jobs for one-line text files (4 uploads of the
+# fixtures, 5 file replacements of updateRecord, 1 upload of uploadRecords), each
+# with an embedding call and an extraction LLM call. The stored files stay in
+# the storage service: no delete of a record or a knowledge base removes them.
 
 name: knowledge-base
 
@@ -31,11 +36,7 @@ path_parameters:
         # at once, and the API answers 400 when the two do not fit. So every
         # valid request browses the readonly knowledge base as an `app`.
         parentType: hub.parentType
-    # The gateway does not mount /api/v1/kb: the route exists only in the Python
-    # connector service. Every request is answered 404, so the run reports the
-    # operation as "Unverified". That is a finding, not a gap of the suite: the
-    # spec has an operation that the API does not serve. Do not hide it with
-    # `no_success_response`.
+    # No request to this path can succeed; see `no_success_response`.
     - path_prefix: /kb
       values:
         recordId: record.mutable.id
@@ -106,35 +107,43 @@ values:
   # mutable record, names the record after the file and starts its indexing again.
   body.file: file.text.path
 
+values_by_operation:
+  setDemoDataForEveryone:
+    # The value that the organization has now, so that no request changes it.
+    # `false` disables every sample account (`@acme-demo.example`) and ends its
+    # sessions, also that of a test user with such an address.
+    # Hides: the other value of `enabled` is never sent.
+    body.enabled: demoData.workspace.enabled
+
 # Values that the suite file gives itself.
 constants:
   hub.parentType: app
   # One entry, for the one file of a request. `file_path` gives the record its
   # name; a path with folders in it would create them.
   upload.filesMetadata: '[{"file_path":"contract-upload.txt","last_modified":1700000000000}]'
-  # Only a synced connector has record groups (a knowledge base is an app, not
-  # a record group), and no fixture creates a connector. A well-formed ID that
-  # names nothing keeps an invalid request that the API accepts from starting
-  # a reindex.
+  # A well-formed ID that names nothing: the API answers 404 before it starts a
+  # reindex. See `no_success_response`.
   recordGroup.absentId: "00000000-0000-4000-8000-000000000000"
 
 # Value keys an operation needs that go into no request: the fixture saves the
 # setting before the run and puts it back when the tests of the suite are done.
+# setDemoDataPreference changes only what the caller sees of the demo data, and
+# only until the suite is done, so its values stay generated.
 requires:
   setDemoDataPreference:
     - demoData.preference.saved
-  setDemoDataForEveryone:
-    - demoData.workspace.saved
 
-# Only invalid requests are sent. The backend must reject them before it acts.
-# The success response of these operations is not checked.
-negative_only:
-  - reason: >-
-      A valid request for a real record group reindexes every record in it, which calls
-      the embedding model and the LLM. No fixture creates a record group: only a synced
-      connector has them.
-    operations:
-      - reindexRecordGroup
+# Valid and invalid requests are sent, and no request can get a 2xx.
+no_success_response:
+  - operation: updateRecordKbConnector
+    reason: >-
+      The gateway does not mount /api/v1/kb; the route exists only in the Python connector
+      service. Every request is answered 404, which the spec lists.
+  - operation: reindexRecordGroup
+    reason: >-
+      No fixture can create a record group: only a synced connector has them (a knowledge
+      base is an app, not a record group). Every request names a group that does not exist
+      and is answered 404.
 
 # Resources that a successful test case creates; the test deletes them at the end.
 # `{id}` is the value at `id_pointer` in the response; other `{...}` are value keys.
