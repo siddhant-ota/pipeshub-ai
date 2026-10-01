@@ -1,0 +1,148 @@
+# Contract-test suite: configuration manager (settings of the whole organization).
+# Routes: backend/nodejs/apps/src/modules/configuration_manager/routes/cm_routes.ts
+# The AI model routes of that file (/configurationManager/ai-models..., /aiModelsConfig)
+# are in the suite `ai-models`.
+# The keys on the right-hand side (`slackBot.mutable.id`, `smtp.saved`, ...) are
+# produced by `contract_values` in conftest.py.
+
+name: configuration-manager
+
+include_path_regex: "^/configurationManager/(?!ai-models|aiModelsConfig)"
+
+# Value for each path parameter.
+#
+# Roles keep the operations apart, in whatever order they run: `mutable` is
+# updated, `disposable` is deleted by the DELETE operation, and `builtIn` is the
+# web search provider that the API always lists and stores nowhere.
+path_parameters:
+  operations:
+    updateSlackBotConfig:
+      configId: slackBot.mutable.id
+    deleteSlackBotConfig:
+      configId: slackBot.disposable.id
+
+    updateWebSearchProvider:
+      providerKey: webSearchProvider.mutable.key
+    deleteWebSearchProvider:
+      providerKey: webSearchProvider.disposable.key
+    # A stored provider is searched with before it becomes the default (a call to the
+    # provider). The built-in one becomes the default with no check.
+    updateDefaultWebSearchProvider:
+      providerKey: webSearchProvider.builtIn.key
+
+# Body fields that get a real value in one operation.
+values_by_operation:
+  # The server posts its metrics, with the API key of its collector, to this URL.
+  # Every valid request therefore sends the URL that the deployment already has.
+  # The price: the run does not show a URL that the spec allows (`format: uri`)
+  # and the API rejects.
+  setMetricsCollectionRemoteServer:
+    body.serverUrl: metricsCollection.serverUrl
+
+# Values that the suite file gives itself.
+constants:
+  webSearchProvider.builtIn.key: duckduckgo
+
+# ID fields whose value the client is free to choose. They keep the generated
+# value, and a request with one is judged like any other.
+client_chosen_ids:
+  - field: body.clientId
+    reason: The client ID that an identity provider issued. The API stores any string.
+  - field: body.tenantId
+    reason: The tenant (directory) ID at Microsoft. The API stores any string.
+  - field: body.emailKey
+    reason: The name of the SAML attribute that holds the email address; it is not an ID.
+
+# Values that an operation needs and that go into no request.
+#
+# A `<setting>.saved` key is a fixture that reads a setting of the whole
+# organization before the run and puts it back when the tests of this suite
+# are done.
+requires:
+  createSMTPConfig:
+    - smtp.saved
+  setAzureAdAuthConfig:
+    - authConfig.azureAd.saved
+  setMicrosoftAuthConfig:
+    - authConfig.microsoft.saved
+  setGoogleAuthConfig:
+    - authConfig.google.saved
+  setSsoAuthConfig:
+    - authConfig.sso.saved
+  setOAuthConfig:
+    - authConfig.oauth.saved
+  setFrontendPublicUrl:
+    - frontendPublicUrl.saved
+  setConnectorPublicUrl:
+    - connectorPublicUrl.saved
+  setPlatformSettings:
+    - platformSettings.saved
+  setCustomSystemPrompt:
+    - systemPrompts.saved
+  toggleMetricsCollection:
+    - metricsCollection.saved
+  setMetricsCollectionRemoteServer:
+    - metricsCollection.saved
+  # No request can be accepted today (see `no_success_response`). When the spec
+  # names the field as the API does, pin it with a constant before the next run:
+  # the API takes 1 ms, and the server then posts its metrics without a pause.
+  setMetricsCollectionPushInterval:
+    - metricsCollection.saved
+  updateWebSearchSettings:
+    - webSearch.saved
+  # The first stored provider becomes the default, a provider can be added or
+  # updated as the default, and deleting the default one makes another the default.
+  # The API refuses to delete a stored DuckDuckGo provider while an agent
+  # searches with DuckDuckGo, so the providers that the test cases add need a
+  # deployment with no such agent.
+  addWebSearchProvider:
+    - webSearch.saved
+    - duckduckgo.agentCount
+  updateWebSearchProvider:
+    - webSearch.saved
+  deleteWebSearchProvider:
+    - webSearch.saved
+  updateDefaultWebSearchProvider:
+    - webSearch.saved
+  # An empty list matches the spec whatever a configuration in it looks like.
+  getSlackBotConfigs:
+    - slackBot.mutable.id
+
+# Sent in full, and still no request can get a 2xx.
+no_success_response:
+  - operation: createSlackBotConfig
+    reason: >-
+      The spec gives the request body no properties (`type: object`), and the API
+      requires `name`, `botToken` and `signingSecret`. A value replaces a field
+      that a request has; it cannot add one.
+  - operation: updateSlackBotConfig
+    reason: >-
+      The spec gives the request body no properties (`type: object`), and the API
+      requires `name`, `botToken` and `signingSecret`. A value replaces a field
+      that a request has; it cannot add one.
+  - operation: setMetricsCollectionPushInterval
+    reason: >-
+      The spec names the field `pushInterval`, and the API requires
+      `pushIntervalMs`. A value replaces a field that a request has; it cannot
+      add one.
+
+# Resources that a successful test case creates; the test deletes them at the end.
+# `{id}` is the value at `id_pointer` in the response.
+created_resources:
+  # For the day the spec describes the body and a request succeeds.
+  - operation: createSlackBotConfig
+    id_pointer: /config/id
+    delete_path: /configurationManager/slack-bot/{id}
+  # Only a DuckDuckGo provider is stored: the API runs a search with the provider
+  # first, and Serper, Tavily and Exa need a working API key for that.
+  - operation: addWebSearchProvider
+    id_pointer: /details/providerKey
+    delete_path: /configurationManager/web-search/providers/{id}
+
+skip:
+  - operation: createStorageConfig
+    reason: >-
+      Switches the storage backend of the whole deployment (local, S3 or Azure Blob;
+      Azure Blob with no check of the credentials), so the files that the other
+      suites uploaded can no longer be read. It cannot be put back: to a user,
+      GET /configurationManager/storageConfig answers `{}` for every backend.
