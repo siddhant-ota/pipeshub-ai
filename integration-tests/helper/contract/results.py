@@ -18,7 +18,7 @@ from helper.contract.config import (
     OperationRun,
 )
 from helper.contract.events import Case, read_cases
-from helper.contract.fields import field_name, pointer_path
+from helper.contract.fields import ANY_ITEM, field_name, pointer_path
 from helper.contract.values import QUERY, Substitution, substitute
 
 STATUS_CODE = "status_code_conformance"
@@ -176,8 +176,14 @@ def _field_name(case: Case) -> str:
 
 
 def _description(case: Case) -> str:
+    """What the case does to its field, without the field name the subject already gives."""
     description = case.description or "Example from the spec"
-    return description.removeprefix(f"{case.parameter}: ") if case.parameter else description
+    path = pointer_path(case.schema_pointer)
+    named = [segment for segment in path if segment != ANY_ITEM]
+    for name in (case.parameter, named[-1] if named else ""):
+        if name:
+            description = description.removeprefix(f"{name}: ")
+    return description
 
 
 def _schema_reason(message: str) -> str:

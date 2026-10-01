@@ -135,6 +135,30 @@ def test_a_rejected_valid_body_names_the_body_field(tmp_path: Path) -> None:
     assert finding.example_request == 'POST /things {"models": [{"modelKey": "x"}]}'
 
 
+def test_a_body_finding_does_not_repeat_the_field_name(tmp_path: Path) -> None:
+    accepted = case_event(
+        "POST /things",
+        case_id="c1",
+        status=201,
+        mode="negative",
+        body={"name": None},
+        data={
+            "scenario": "incorrect_type",
+            "description": "name: Incorrect type",
+            "parameter": "application/json",
+            "parameter_location": "body",
+            "location": "/properties/name/type",
+        },
+        failed={NEGATIVE_REJECTION: "Invalid data should have been rejected"},
+    )
+
+    (key,) = _collect(
+        tmp_path, [accepted], run=operation_run("createThing", "POST", "/things")
+    ).findings
+
+    assert (key.subject, key.detail) == ("body.name", "Incorrect type")
+
+
 def test_a_schema_difference_is_identified_by_the_rule_not_by_the_value(tmp_path: Path) -> None:
     def wrong_type(case_id: str, value: str) -> dict:
         return case_event(

@@ -305,6 +305,18 @@ check runs in CI through `python3 -m unittest discover -s scripts`.
 
 After each run, an **HTML** report is written to `integration-tests/reports/` with a graph-DB-tagged, timestamped filename, e.g. `INTEGRATION_TEST_REPORT_neo4j_2025-03-09_14-30-45.html`. Open it when debugging: verdict summary, pass/fail/skip counts, **parsed root cause** per failure, **cascade hints** when a later ordered test fails because shared state was never set (e.g. `KeyError: connector_id`), **full tracebacks**, optional captured stdout/stderr, and tables of all results by suite with durations. Keep multiple runs to compare over time.
 
+### Contract tests (does the OpenAPI spec describe the API?)
+
+`pytest -m contract` checks `pipeshub-openapi.yaml` against the running API. Schemathesis
+generates valid and invalid requests from the spec, including the boundary values of every
+constraint, and each response is checked against the spec. There is one test per operation;
+the API is the reference, so a failure means the spec says something else than the API does.
+
+These tests are marked `contract`, not `integration`, so the shards above do not run them.
+A run sends about 4,400 requests and creates, changes and deletes data, so use a deployment
+that holds nothing anyone needs. `pytest -m contract --collect-only -q` lists the tests and
+sends nothing. Everything else is in [`helper/contract/README.md`](helper/contract/README.md).
+
 ---
 
 ## Test lifecycle
@@ -364,6 +376,8 @@ Tests clone the [pipeshub-ai/integration-test](https://github.com/pipeshub-ai/in
 | `helper/mcp_pin.py` | Reads the `@pipeshub-ai/mcp` pin from `backend/nodejs/apps/package.json`. |
 | `response-validation/mcp/` | MCP surface tests and the per-version golden files. |
 | `helper/pipeshub_client.py` | HTTP client for Pipeshub connector API (client_credentials). |
+| `helper/contract/` | Contract tests: runs Schemathesis for a suite and judges where the spec and the API differ. See its README. |
+| `response-validation/enterprise-search/contract/` | The enterprise-search contract suite (`suite.yaml`), its accepted differences (`baseline.json`) and its tests. |
 | `helper/graph_provider.py` | `GraphProviderProtocol` — common graph test helper interface. |
 | `helper/graph_provider_utils.py` | Shared polling helpers (`wait_until_graph_condition`, etc.). |
 | `helper/neo4j_integration/test_neo4j_provider.py` | `TestNeo4jProvider` — extends backend `Neo4jProvider` with graph validation helpers. |
