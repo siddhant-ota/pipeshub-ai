@@ -26,12 +26,24 @@ from helper.contract.results import (
 )
 
 _VERDICT_TEXT = {
-    VERDICT_MISMATCH: ("Differs", "A difference between the spec and the API that the baseline does not list"),
-    VERDICT_STALE_BASELINE: ("Stale baseline", "The baseline lists a difference that no longer occurs"),
+    VERDICT_MISMATCH: (
+        "Differs",
+        "A difference between the spec and the API that the baseline does not list",
+    ),
+    VERDICT_STALE_BASELINE: (
+        "Stale baseline",
+        "The baseline lists a difference that no longer occurs",
+    ),
     VERDICT_NOT_RUN: ("Not run", "No request was sent: a value the operation needs is missing"),
     VERDICT_UNVERIFIED: ("Unverified", "No difference, but no 2xx response was checked"),
-    VERDICT_KNOWN_MISMATCH: ("Known difference", "Differences found; the baseline lists all of them"),
-    VERDICT_PARTIAL: ("Partly checked", "No difference; by design the success response is not checked"),
+    VERDICT_KNOWN_MISMATCH: (
+        "Known difference",
+        "Differences found; the baseline lists all of them",
+    ),
+    VERDICT_PARTIAL: (
+        "Partly checked",
+        "No difference; by design the success response is not checked",
+    ),
     VERDICT_SKIPPED: ("Skipped", "The suite file skips the operation"),
     VERDICT_MATCH: ("Matches", "The spec and the API agree, and a success response was checked"),
 }
@@ -88,7 +100,9 @@ def _headline(results: list[OperationResult]) -> tuple[str, str]:
     known = sum(len(result.known_findings) for result in results)
     stale = sum(len(result.stale) for result in results)
     gaps = sum(bool(result.gap) for result in results)
-    contract = "DIFFERS" if new or stale else "MATCHES (with known differences)" if known else "MATCHES"
+    contract = (
+        "DIFFERS" if new or stale else "MATCHES (with known differences)" if known else "MATCHES"
+    )
     coverage = "INCOMPLETE" if gaps else "COMPLETE"
     return (
         f"Contract: {contract} — {new} new difference(s), {known} known, {stale} stale in the baseline.",
@@ -148,8 +162,15 @@ def render_report(results: list[OperationResult], meta: dict[str, Any]) -> str:
         *_table(
             ["Operation", "operationId", "Verdict", "Why"],
             [
-                [_name(result.run), result.run.operation_id, _VERDICT_TEXT[result.verdict][0], result.gap]
-                for result in sorted(gaps, key=lambda r: (_VERDICT_ORDER.index(r.verdict), r.run.path))
+                [
+                    _name(result.run),
+                    result.run.operation_id,
+                    _VERDICT_TEXT[result.verdict][0],
+                    result.gap,
+                ]
+                for result in sorted(
+                    gaps, key=lambda r: (_VERDICT_ORDER.index(r.verdict), r.run.path)
+                )
             ],
         ),
         "## Differences between the spec and the API",
@@ -159,12 +180,16 @@ def render_report(results: list[OperationResult], meta: dict[str, Any]) -> str:
     with_findings = [result for result in results if result.findings or result.stale]
     if not with_findings:
         lines += ["None.", ""]
-    for result in sorted(with_findings, key=lambda r: (not r.new_findings, not r.run.sdk, r.run.path)):
+    for result in sorted(
+        with_findings, key=lambda r: (not r.new_findings, not r.run.sdk, r.run.path)
+    ):
         lines += [f"### {_name(result.run)} — {result.run.operation_id}", ""]
         for finding in sorted(result.findings.values(), key=lambda f: (f.known, str(f.key))):
             lines += _finding_lines(finding)
         for key in result.stale:
-            lines.append(f"- **stale baseline entry** — {key}: the run did not reproduce it; remove it from the baseline")
+            lines.append(
+                f"- **stale baseline entry** — {key}: the run did not reproduce it; remove it from the baseline"
+            )
         lines.append("")
 
     lines += [
@@ -174,7 +199,10 @@ def render_report(results: list[OperationResult], meta: dict[str, Any]) -> str:
         "",
         *_table(
             ["Operation", "operationId", "Responses"],
-            [[_name(result.run), result.run.operation_id, _statuses(result)] for result in server_errors],
+            [
+                [_name(result.run), result.run.operation_id, _statuses(result)]
+                for result in server_errors
+            ],
         ),
         "## All operations",
         "",
@@ -186,24 +214,37 @@ def render_report(results: list[OperationResult], meta: dict[str, Any]) -> str:
                     result.run.operation_id,
                     "yes" if result.run.sdk else "",
                     _VERDICT_TEXT[result.verdict][0],
-                    f"{result.cases} ({result.positive} valid, {result.negative} invalid)" if result.cases else "",
+                    f"{result.cases} ({result.positive} valid, {result.negative} invalid)"
+                    if result.cases
+                    else "",
                     _statuses(result),
                     len(result.new_findings) or "",
                     len(result.known_findings) or "",
                 ]
                 for result in sorted(
-                    results, key=lambda r: (_VERDICT_ORDER.index(r.verdict), not r.run.sdk, r.run.path)
+                    results,
+                    key=lambda r: (_VERDICT_ORDER.index(r.verdict), not r.run.sdk, r.run.path),
                 )
             ],
         ),
     ]
     ignored = sum(result.ignored for result in results)
+    unjudged = sum(result.unjudged for result in results)
+    if ignored or unjudged:
+        lines += ["## Failed checks that are not counted", ""]
     if ignored:
-        note = (
-            f"{ignored} failed check(s) were left out: the API accepted an unknown query, header or "
-            "cookie parameter. OpenAPI cannot forbid one, so that is not a difference from the spec."
-        )
-        lines += [note, ""]
+        lines += [
+            f"- {ignored}: the API accepted an unknown query, header or cookie parameter. "
+            + "OpenAPI cannot forbid one, so that is not a difference from the spec.",
+        ]
+    if unjudged:
+        lines += [
+            f"- {unjudged}: the API rejected a valid request that had a generated value in an ID field "
+            + "the suite waives (`waived_id_fields`). The request named something that does not exist, "
+            + "so the rejection says nothing about the spec. A fixture for that field would close the gap.",
+        ]
+    if ignored or unjudged:
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -251,7 +292,9 @@ def render_plan(runs: list[OperationRun], ndjson_path: Path, meta: dict[str, Any
     by_label: dict[str, Counter[tuple[str, str]]] = {}
     for case in read_cases(ndjson_path):
         mode = "invalid" if case.is_negative else "valid"
-        by_label.setdefault(case.label, Counter())[(mode, case.what or "Example from the spec")] += 1
+        by_label.setdefault(case.label, Counter())[
+            (mode, case.what or "Example from the spec")
+        ] += 1
 
     def _count(run: OperationRun, mode: str | None = None) -> int:
         counter = by_label.get(run.label, Counter())

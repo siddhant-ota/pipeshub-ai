@@ -61,7 +61,9 @@ LIMIT_ABOVE_MAXIMUM = case_event(
     },
     failed={NEGATIVE_REJECTION: "Invalid data should have been rejected"},
 )
-LIMIT_KEY = FindingKey("listThings", NEGATIVE_REJECTION, "query.limit", "Value greater than maximum")
+LIMIT_KEY = FindingKey(
+    "listThings", NEGATIVE_REJECTION, "query.limit", "Value greater than maximum"
+)
 VALID = case_event(LIST, case_id="ok", passed=(STATUS_CODE, RESPONSE_SCHEMA))
 
 
@@ -162,12 +164,17 @@ def test_a_missing_required_property_keeps_its_name(tmp_path: Path) -> None:
     missing = case_event(
         LIST,
         case_id="c1",
-        failed={RESPONSE_SCHEMA: '"items" is a required property\n\nValidated against the response schema'},
+        failed={
+            RESPONSE_SCHEMA: '"items" is a required property\n\nValidated against the response schema'
+        },
     )
 
     (key,) = _collect(tmp_path, [missing]).findings
 
-    assert (key.subject, key.detail) == ("status 200 response body", '"items" is a required property')
+    assert (key.subject, key.detail) == (
+        "status 200 response body",
+        '"items" is a required property',
+    )
 
 
 def test_an_undocumented_status_code_is_a_difference(tmp_path: Path) -> None:
@@ -227,6 +234,57 @@ def test_an_unknown_body_property_is_a_spec_difference(tmp_path: Path) -> None:
     assert result.verdict == VERDICT_MISMATCH
 
 
+def test_a_rejected_request_that_names_nothing_real_is_not_judged(tmp_path: Path) -> None:
+    """The suite waives `body.toolsets[*].instanceId`, so its value is random and no toolset has it."""
+    run = operation_run(
+        "createThing",
+        "POST",
+        "/things",
+        waived_fields=("body.toolsets[*].instanceId", "query.runId"),
+    )
+    failed = {POSITIVE_ACCEPTANCE: "Valid data should have been accepted"}
+    data = {
+        "description": "Maximum length",
+        "parameter": "application/json",
+        "parameter_location": "body",
+        "location": "/properties/name",
+    }
+
+    with_toolset = case_event(
+        "POST /things",
+        case_id="a",
+        status=400,
+        body={"name": "n", "toolsets": [{"instanceId": "random"}]},
+        data=data,
+        failed=failed,
+    )
+    with_run_id = case_event(
+        "POST /things",
+        case_id="b",
+        status=400,
+        query="runId=random",
+        body={"name": "n"},
+        data=data,
+        failed=failed,
+    )
+    plain = case_event(
+        "POST /things",
+        case_id="c",
+        status=400,
+        body={"name": "n", "toolsets": []},
+        data=data,
+        failed=failed,
+    )
+
+    unjudged = _collect(tmp_path, [with_toolset, with_run_id], run=run)
+    assert not unjudged.findings
+    assert unjudged.unjudged == 2
+
+    judged = _collect(tmp_path, [plain], run=run)
+    assert [key.subject for key in judged.findings] == ["body.name"]
+    assert judged.unjudged == 0
+
+
 def test_no_2xx_response_leaves_the_operation_unverified(tmp_path: Path) -> None:
     not_found = case_event(LIST, case_id="c1", status=404, passed=(STATUS_CODE,))
 
@@ -237,13 +295,21 @@ def test_no_2xx_response_leaves_the_operation_unverified(tmp_path: Path) -> None
 
 
 def test_a_declared_gap_is_partial_not_a_failure(tmp_path: Path) -> None:
-    rejected = case_event(LIST, case_id="c1", status=400, mode="negative", passed=(NEGATIVE_REJECTION,))
+    rejected = case_event(
+        LIST, case_id="c1", status=400, mode="negative", passed=(NEGATIVE_REJECTION,)
+    )
 
     negative_only = _collect(
-        tmp_path, [rejected], run=operation_run("listThings", "GET", "/things", state=STATE_NEGATIVE_ONLY, reason="Calls the LLM.")
+        tmp_path,
+        [rejected],
+        run=operation_run(
+            "listThings", "GET", "/things", state=STATE_NEGATIVE_ONLY, reason="Calls the LLM."
+        ),
     )
     no_success = _collect(
-        tmp_path, [rejected], run=operation_run("listThings", "GET", "/things", no_success_reason="Nothing to cancel.")
+        tmp_path,
+        [rejected],
+        run=operation_run("listThings", "GET", "/things", no_success_reason="Nothing to cancel."),
     )
 
     assert negative_only.verdict == no_success.verdict == VERDICT_PARTIAL
@@ -260,7 +326,11 @@ def test_a_declared_gap_is_partial_not_a_failure(tmp_path: Path) -> None:
     ],
 )
 def test_an_operation_that_was_not_sent(tmp_path: Path, state: str, verdict: str) -> None:
-    result = _collect(tmp_path, [], run=operation_run("listThings", "GET", "/things", state=state, reason="Because."))
+    result = _collect(
+        tmp_path,
+        [],
+        run=operation_run("listThings", "GET", "/things", state=state, reason="Because."),
+    )
 
     assert result.verdict == verdict
     assert result.gap == "Because."
@@ -328,11 +398,17 @@ def test_baseline_round_trip_keeps_notes_and_drops_what_is_fixed(tmp_path: Path)
 
 def test_report_states_the_contract_and_the_coverage(tmp_path: Path) -> None:
     differs = _collect(tmp_path, [VALID, LIMIT_ABOVE_MAXIMUM])
-    skipped = OperationResult(operation_run("deleteThing", "DELETE", "/things/{thingId}", state=STATE_SKIPPED, reason="Destructive."))
+    skipped = OperationResult(
+        operation_run(
+            "deleteThing", "DELETE", "/things/{thingId}", state=STATE_SKIPPED, reason="Destructive."
+        )
+    )
 
     report = render_report([differs, skipped], META)
 
-    assert "**Contract: DIFFERS** — 1 new difference(s), 0 known, 0 stale in the baseline." in report
+    assert (
+        "**Contract: DIFFERS** — 1 new difference(s), 0 known, 0 stale in the baseline." in report
+    )
     assert "**Coverage: INCOMPLETE** — 1 of 2 operations have a coverage gap." in report
     assert "| `DELETE /things/{thingId}` | deleteThing | Skipped | Destructive. |" in report
     assert "- **new** — query.limit: Value greater than maximum" in report
@@ -341,7 +417,9 @@ def test_report_states_the_contract_and_the_coverage(tmp_path: Path) -> None:
 
 def test_an_operation_with_differences_can_also_have_a_coverage_gap(tmp_path: Path) -> None:
     """A negative-only operation that differs is still not fully checked."""
-    run = operation_run("listThings", "GET", "/things", state=STATE_NEGATIVE_ONLY, reason="Calls the LLM.")
+    run = operation_run(
+        "listThings", "GET", "/things", state=STATE_NEGATIVE_ONLY, reason="Calls the LLM."
+    )
     result = _collect(tmp_path, [LIMIT_ABOVE_MAXIMUM], run=run)
 
     assert result.verdict == VERDICT_MISMATCH

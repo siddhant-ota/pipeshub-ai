@@ -38,7 +38,12 @@ SPEC: dict[str, Any] = {
             "delete": {
                 "operationId": "deleteThing",
                 "parameters": [
-                    {"name": "thingId", "in": "path", "required": True, "schema": {"type": "string"}}
+                    {
+                        "name": "thingId",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    }
                 ],
                 "responses": {"200": {"content": {"text/event-stream": {"schema": {}}}}},
             }
@@ -86,7 +91,9 @@ SPEC: dict[str, Any] = {
 SUITE: dict[str, Any] = {
     "name": "things",
     "include_path_regex": "^/things",
-    "path_parameters": {"defaults": [{"path_prefix": "/things", "values": {"thingId": "thing.id"}}]},
+    "path_parameters": {
+        "defaults": [{"path_prefix": "/things", "values": {"thingId": "thing.id"}}]
+    },
     "values": {
         "query.projectId": "project.id",
         "body.filters.kb[*]": "kb.id",

@@ -31,7 +31,8 @@ from helper.contract.values import ContractValues
 pytestmark = pytest.mark.unit
 
 ENTERPRISE_SEARCH = (
-    Path(__file__).resolve().parents[1] / "response-validation/enterprise-search/contract/suite.yaml"
+    Path(__file__).resolve().parents[1]
+    / "response-validation/enterprise-search/contract/suite.yaml"
 )
 PLANNED = {
     "POST /search": "search",
@@ -51,14 +52,20 @@ def suite(tmp_path: Path) -> Suite:
             tmp_path,
             negative_only={"reason": "Costs money.", "operations": ["createThing"]},
             created_resources=[
-                {"operation": "createThing", "id_pointer": "/thing/_id", "delete_path": "/things/{id}?p={project.id}"}
+                {
+                    "operation": "createThing",
+                    "id_pointer": "/thing/_id",
+                    "delete_path": "/things/{id}?p={project.id}",
+                }
             ],
         ),
         SPEC,
     )
 
 
-def _states(suite: Suite, values: ContractValues, selected: set[str] | None = None) -> dict[str, str]:
+def _states(
+    suite: Suite, values: ContractValues, selected: set[str] | None = None
+) -> dict[str, str]:
     return {run.operation_id: run.state for run in plan_run(suite, values, selected)}
 
 
@@ -129,10 +136,16 @@ def test_created_resources_are_found_in_the_2xx_responses(suite: Suite, tmp_path
     events = write_events(
         tmp_path,
         [
-            case_event("POST /things", case_id="a", status=201, response={"thing": {"_id": "new-1"}}),
-            case_event("POST /things", case_id="b", status=400, response={"thing": {"_id": "not-created"}}),
+            case_event(
+                "POST /things", case_id="a", status=201, response={"thing": {"_id": "new-1"}}
+            ),
+            case_event(
+                "POST /things", case_id="b", status=400, response={"thing": {"_id": "not-created"}}
+            ),
             case_event("POST /things", case_id="c", status=201, response={"unexpected": True}),
-            case_event("GET /things", case_id="d", status=200, response={"thing": {"_id": "listed"}}),
+            case_event(
+                "GET /things", case_id="d", status=200, response={"thing": {"_id": "listed"}}
+            ),
         ],
     )
 
@@ -172,7 +185,12 @@ def test_schemathesis_tests_the_boundaries_of_a_range(planned_cases: dict[str, l
         if case.parameter == "limit"
     }
 
-    assert {"Value greater than maximum", "Value smaller than minimum", "Maximum value", "Minimum value"} <= limit
+    assert {
+        "Value greater than maximum",
+        "Value smaller than minimum",
+        "Maximum value",
+        "Minimum value",
+    } <= limit
 
 
 def test_a_negative_only_operation_sends_no_valid_request(planned_cases: dict[str, list]) -> None:
@@ -187,11 +205,19 @@ def test_no_case_uses_a_method_the_spec_does_not_list(planned_cases: dict[str, l
 def test_real_values_reach_the_request(planned_cases: dict[str, list]) -> None:
     placeholder = "0" * 24
     with_kb = [case for case in planned_cases["POST /search"] if '"kb": ["' in case.request_body]
-    with_project = [case for case in planned_cases["GET /conversations"] if "projectId=" in case.target]
+    with_project = [
+        case for case in planned_cases["GET /conversations"] if "projectId=" in case.target
+    ]
 
     assert with_kb and with_project
     # A valid request always carries the real ID. So does an invalid one whose
     # invalid part is elsewhere: the ID must not be a second reason to reject it.
-    assert all(f'"kb": ["{placeholder}"' in case.request_body for case in with_kb if not case.is_negative)
-    assert all(f"projectId={placeholder}" in case.target for case in with_project if not case.is_negative)
-    assert any(f"projectId={placeholder}" in case.target for case in with_project if case.is_negative)
+    assert all(
+        f'"kb": ["{placeholder}"' in case.request_body for case in with_kb if not case.is_negative
+    )
+    assert all(
+        f"projectId={placeholder}" in case.target for case in with_project if not case.is_negative
+    )
+    assert any(
+        f"projectId={placeholder}" in case.target for case in with_project if case.is_negative
+    )

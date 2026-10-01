@@ -53,7 +53,11 @@ def resolve(spec: dict[str, Any], node: Any) -> Any:
         seen.add(ref)
         node = spec
         for part in ref[2:].split("/"):
-            node = node.get(part.replace("~1", "/").replace("~0", "~"), {}) if isinstance(node, dict) else {}
+            node = (
+                node.get(part.replace("~1", "/").replace("~0", "~"), {})
+                if isinstance(node, dict)
+                else {}
+            )
     return node
 
 

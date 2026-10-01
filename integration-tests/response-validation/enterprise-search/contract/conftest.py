@@ -38,11 +38,13 @@ SUITE_PATH = Path(__file__).with_name("suite.yaml")
 BASELINE_PATH = Path(__file__).with_name("baseline.json")
 TEST_FILE = "integration_test_contract.py"
 
-# One conversation per role, so that an update, an archive or a delete under
-# test cannot change what another operation reads.
-CONVERSATION_ROLES = ("mutable", "archivable", "disposable")
+# One resource per role, so that an update, an archive or a delete under test
+# cannot change what another operation reads, in whatever order they run.
+# `archivable` is there to be archived; `archived` already is, to be unarchived.
+ARCHIVED = "archived"
+CONVERSATION_ROLES = ("mutable", "archivable", ARCHIVED, "disposable")
 AGENT_ROLES = ("mutable", "disposable")
-SEARCH_ROLES = ("readonly", "archivable", "disposable")
+SEARCH_ROLES = ("readonly", "archivable", ARCHIVED, "disposable")
 _CONVERSATION_IDS = ("id", "botMessageId")
 _LLM_TIMEOUT_SEC = 180
 
@@ -65,7 +67,9 @@ def _conversation_ids(resp: requests.Response, what: str) -> dict[str, str]:
         ),
         None,
     )
-    assert bot_message and bot_message.get("_id"), f"{what}: conversation has no bot_response message"
+    assert bot_message and bot_message.get("_id"), (
+        f"{what}: conversation has no bot_response message"
+    )
     return {"id": str(conversation["_id"]), "botMessageId": str(bot_message["_id"])}
 
 
@@ -91,6 +95,11 @@ def contract_conversations(
                 query=seed_query(f"contract-{role}-{uuid4().hex[:8]}"), timeout=_LLM_TIMEOUT_SEC
             )
             created[role] = _conversation_ids(resp, f"Create conversation ({role})")
+        _body(
+            conversations_client.archive_conversation(created[ARCHIVED]["id"]),
+            (200,),
+            "Archive conversation",
+        )
         yield created
     finally:
         for role, ids in created.items():
@@ -143,12 +152,19 @@ def contract_agent_conversations(
                 timeout=_LLM_TIMEOUT_SEC,
             )
             created[role] = _conversation_ids(resp, f"Create agent conversation ({role})")
+        _body(
+            agent_conversations_client.archive_conversation(agent_key, created[ARCHIVED]["id"]),
+            (200,),
+            "Archive agent conversation",
+        )
         yield created
     finally:
         for role, ids in created.items():
             _delete_quietly(
                 f"agent conversation ({role})",
-                lambda ids=ids: agent_conversations_client.delete_conversation(agent_key, ids["id"]),
+                lambda ids=ids: agent_conversations_client.delete_conversation(
+                    agent_key, ids["id"]
+                ),
             )
 
 
@@ -158,15 +174,19 @@ def contract_searches(search_client: SearchClient, session_kb: Any) -> Iterator[
     created: dict[str, str] = {}
     try:
         for role in SEARCH_ROLES:
-            resp = search_client.search(f"contract {role} {uuid4().hex[:8]}", timeout=_LLM_TIMEOUT_SEC)
+            resp = search_client.search(
+                f"contract {role} {uuid4().hex[:8]}", timeout=_LLM_TIMEOUT_SEC
+            )
             search_id = _body(resp, (200, 201), f"Create search ({role})").get("searchId")
             assert search_id, f"Create search ({role}): response has no searchId"
             created[role] = str(search_id)
+        _body(search_client.archive_search(created[ARCHIVED]), (200,), "Archive search")
         yield created
     finally:
         for role, search_id in created.items():
             _delete_quietly(
-                f"search ({role})", lambda search_id=search_id: search_client.delete_search(search_id)
+                f"search ({role})",
+                lambda search_id=search_id: search_client.delete_search(search_id),
             )
 
 

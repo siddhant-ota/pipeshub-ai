@@ -55,7 +55,12 @@ def write_baseline(path: Path, results: list[OperationResult]) -> tuple[int, int
     entries = [
         *kept.values(),
         *(
-            {"operation": key.operation_id, "check": key.check, "subject": key.subject, "detail": key.detail}
+            {
+                "operation": key.operation_id,
+                "check": key.check,
+                "subject": key.subject,
+                "detail": key.detail,
+            }
             for key in added
         ),
     ]

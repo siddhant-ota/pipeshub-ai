@@ -19,6 +19,7 @@ from helper.contract.config import (
 )
 from helper.contract.events import Case, read_cases
 from helper.contract.fields import field_name, pointer_path
+from helper.contract.values import QUERY, Substitution, substitute
 
 STATUS_CODE = "status_code_conformance"
 CONTENT_TYPE = "content_type_conformance"
@@ -110,6 +111,8 @@ class OperationResult:
     stale: list[FindingKey] = field(default_factory=list)
     # Failed checks that say nothing about the spec; see `_is_spec_statement`.
     ignored: int = 0
+    # Rejected valid requests that named something that does not exist; see `_names_nothing_real`.
+    unjudged: int = 0
 
     @property
     def success_responses(self) -> int:
@@ -192,7 +195,9 @@ def finding_key(operation_id: str, case: Case, check: str, message: str) -> Find
         return FindingKey(operation_id, check, status, "")
     if check == CONTENT_TYPE:
         received = _RECEIVED.search(message)
-        return FindingKey(operation_id, check, status, received["value"].strip() if received else "")
+        return FindingKey(
+            operation_id, check, status, received["value"].strip() if received else ""
+        )
     schema = _SCHEMA_AT.search(message)
     subject = f"{status} {schema['path']}" if schema else f"{status} response body"
     return FindingKey(operation_id, check, subject, _schema_reason(message))
@@ -204,6 +209,23 @@ def _is_spec_statement(case: Case, check: str) -> bool:
         and case.scenario == _UNEXPECTED_PROPERTIES
         and case.location in _OPEN_LOCATIONS
     )
+
+
+def _names_nothing_real(case: Case, waived_fields: tuple[str, ...]) -> bool:
+    """True if the request has a generated value in an ID field that the suite waives.
+
+    The spec allows such a request, but it names a toolset, a record or the like
+    that does not exist, and the API is right to reject it. Its rejection says
+    nothing about the spec.
+    """
+    for name in waived_fields:
+        probe = Substitution.for_field(name, "")
+        if probe.location == QUERY:
+            if probe.path[0] in case.query:
+                return True
+        elif substitute(case.request_json(), probe)[1]:
+            return True
+    return False
 
 
 def _example_request(case: Case) -> str:
@@ -235,6 +257,11 @@ def collect(
                     continue
                 if not _is_spec_statement(case, check.name):
                     result.ignored += 1
+                    continue
+                if check.name == POSITIVE_ACCEPTANCE and _names_nothing_real(
+                    case, result.run.waived_fields
+                ):
+                    result.unjudged += 1
                     continue
                 key = finding_key(result.run.operation_id, case, check.name, check.message)
                 finding = result.findings.setdefault(

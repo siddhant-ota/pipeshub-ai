@@ -220,7 +220,7 @@ def judge(suite: Suite, baseline_path: Path | None = None) -> ContractRun:
     if not files.manifest.exists():
         raise RunnerError(f"No run of suite {suite.name!r} found in {files.directory}.")
     saved = json.loads(files.manifest.read_text(encoding="utf-8"))
-    runs = [OperationRun(**entry) for entry in saved["runs"]]
+    runs = [OperationRun.from_dict(entry) for entry in saved["runs"]]
     baseline = load_baseline(baseline_path) if baseline_path else set()
     results = collect(runs, files.events, baseline)
     write_report(results, saved["meta"], files.directory)

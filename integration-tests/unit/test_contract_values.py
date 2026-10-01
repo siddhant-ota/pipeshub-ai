@@ -92,12 +92,26 @@ PROJECT = Substitution.for_field("query.projectId", "P")
         # A valid part of the request.
         (KB, None, False),
         # The case is about this field, its parent, or the whole body.
-        (KB, Mutation("body", "application/json", "/properties/filters/properties/kb/items/type"), True),
+        (
+            KB,
+            Mutation("body", "application/json", "/properties/filters/properties/kb/items/type"),
+            True,
+        ),
         (KB, Mutation("body", "application/json", "/properties/filters/type"), True),
         (KB, Mutation("body", "application/json", "/type"), True),
-        (KB, Mutation("body", "application/json", "/allOf/0/properties/filters/properties/kb/maxItems"), True),
+        (
+            KB,
+            Mutation(
+                "body", "application/json", "/allOf/0/properties/filters/properties/kb/maxItems"
+            ),
+            True,
+        ),
         # The case is about another body field: the ID must still be real.
-        (KB, Mutation("body", "application/json", "/properties/filters/properties/apps/items/type"), False),
+        (
+            KB,
+            Mutation("body", "application/json", "/properties/filters/properties/apps/items/type"),
+            False,
+        ),
         (KB, Mutation("body", "application/json", "/properties/query/minLength"), False),
         # The case is about another part of the request.
         (KB, Mutation("query", "limit", ""), False),

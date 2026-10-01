@@ -54,7 +54,9 @@ def test_operations_in_scope_follow_the_path_filter() -> None:
 
 
 def test_request_fields_mark_the_fields_that_hold_an_id() -> None:
-    by_id = {operation.operation_id: operation for operation in operations_in_scope(SPEC, "^/things")}
+    by_id = {
+        operation.operation_id: operation for operation in operations_in_scope(SPEC, "^/things")
+    }
 
     listed = {field.name: field.is_id for field in request_fields(SPEC, by_id["listThings"])}
     created = {field.name: field.is_id for field in request_fields(SPEC, by_id["createThing"])}

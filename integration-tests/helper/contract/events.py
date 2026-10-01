@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 API_PREFIX = "/api/v1"
 NEGATIVE = "negative"
@@ -52,21 +52,37 @@ class Case:
     def request_body(self) -> str:
         return base64.b64decode(self.request_base64).decode("utf-8", errors="replace")
 
+    def request_json(self) -> Any:
+        """The request body as JSON, or None if it is empty or not JSON."""
+        return _json(self.request_base64)
+
+    @property
+    def query(self) -> dict[str, list[str]]:
+        return parse_qs(urlsplit(self.target).query, keep_blank_values=True)
+
     def response_json(self) -> Any:
         """The response body as JSON, or None if it is empty or not JSON."""
-        if not self.response_base64:
-            return None
-        try:
-            return json.loads(base64.b64decode(self.response_base64))
-        except ValueError:
-            return None
+        return _json(self.response_base64)
 
     @property
     def what(self) -> str:
         """One line that says what this case sends."""
-        description = self.description.removeprefix(f"{self.parameter}: ") if self.parameter else self.description
+        description = (
+            self.description.removeprefix(f"{self.parameter}: ")
+            if self.parameter
+            else self.description
+        )
         where = " ".join(part for part in (self.location, self.parameter) if part)
         return f"{where}: {description}" if where else description
+
+
+def _json(encoded: str) -> Any:
+    if not encoded:
+        return None
+    try:
+        return json.loads(base64.b64decode(encoded))
+    except ValueError:
+        return None
 
 
 def _target(uri: str) -> str:

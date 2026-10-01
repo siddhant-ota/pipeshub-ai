@@ -38,7 +38,9 @@ def _operations() -> list[pytest.ParameterSet]:
             planned.operation.operation_id,
             id=planned.operation.label,
             # Skipped here, at collection, so that a skipped operation never starts the run.
-            marks=pytest.mark.skip(reason=planned.reason) if planned.profile == PROFILE_SKIP else (),
+            marks=pytest.mark.skip(reason=planned.reason)
+            if planned.profile == PROFILE_SKIP
+            else (),
         )
         for planned in SUITE.operations
     ]

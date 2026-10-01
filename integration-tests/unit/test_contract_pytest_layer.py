@@ -30,7 +30,7 @@ DIFFERS = "GET /search/{searchId}"
 SKIPPED = "DELETE /search"
 TEST_MODULE = "contract/integration_test_contract.py"
 
-ROOT_CONFTEST = '''
+ROOT_CONFTEST = """
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -76,6 +76,9 @@ class Conversations:
             log.write("conversation " + " ".join(ids) + "\\n")
         return Response(200, {})
 
+    def archive_conversation(self, *ids):
+        return Response(200, {})
+
 
 class Agents:
     def create_agent(self, **payload):
@@ -92,6 +95,9 @@ class Searches:
         return Response(200, {"searchId": "search-" + query.split()[1]})
 
     def delete_search(self, search_id):
+        return Response(200, {})
+
+    def archive_search(self, search_id):
         return Response(200, {})
 
 
@@ -162,7 +168,7 @@ def readonly_agent_conversation():
 @pytest.fixture(scope="session")
 def second_user():
     return SimpleNamespace(user_id="user-2")
-'''
+"""
 
 
 @pytest.fixture
@@ -185,7 +191,9 @@ def _environment(project: Path) -> dict[str, str]:
     }
 
 
-def _run(project: Path, *selected: str, search_fails: bool = False) -> subprocess.CompletedProcess[str]:
+def _run(
+    project: Path, *selected: str, search_fails: bool = False
+) -> subprocess.CompletedProcess[str]:
     (project / "conftest.py").write_text(
         f"SEARCH_FAILS = {search_fails}\n{textwrap.dedent(ROOT_CONFTEST)}", encoding="utf-8"
     )
@@ -225,13 +233,15 @@ def test_each_operation_gets_the_outcome_of_its_verdict(project: Path) -> None:
     # Only the selected operations were sent, with the values from the fixtures.
     manifest = (project / "reports/enterprise-search/run/manifest.json").read_text(encoding="utf-8")
     assert manifest.count('"state": "full"') == 2
-    config = (project / "reports/enterprise-search/run/schemathesis.toml").read_text(encoding="utf-8")
+    config = (project / "reports/enterprise-search/run/schemathesis.toml").read_text(
+        encoding="utf-8"
+    )
     assert '"path.searchId" = "search-readonly"' in config
     assert '"path.conversationId" = "conversation-2"' in config, "the archivable conversation"
 
     # The fixture conversations are deleted at the end.
     deleted = (project / "deleted.txt").read_text(encoding="utf-8")
-    assert deleted.count("conversation ") == 6
+    assert deleted.count("conversation ") == 8
 
 
 def test_a_known_difference_is_an_expected_failure(project: Path) -> None:
@@ -259,5 +269,8 @@ def test_a_fixture_that_fails_fails_only_the_operations_that_need_it(project: Pa
 
     assert f"PASSED {TEST_MODULE}::test_spec_matches_api[{MATCHES}]" in output, output
     assert f"FAILED {TEST_MODULE}::test_spec_matches_api[{DIFFERS}]" in output
-    assert "Missing value: search.readonly.id (fixture `contract_searches` failed: AssertionError" in output
+    assert (
+        "Missing value: search.readonly.id (fixture `contract_searches` failed: AssertionError"
+        in output
+    )
     assert "No documents are available" in output

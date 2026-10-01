@@ -10,9 +10,10 @@ include_path_regex: "^/(conversations|search|agents)(/|$)"
 # Value for each path parameter. `operations` wins over `defaults`; in
 # `defaults` the first matching path prefix wins.
 #
-# Roles keep the operations apart: `readonly` is only read, `mutable` is
-# updated, `archivable` is archived and unarchived, and `disposable` is deleted
-# by the DELETE operation under test.
+# Roles keep the operations apart, in whatever order they run: `readonly` is
+# only read, `mutable` is updated, `archivable` is archived by the archive
+# operation, `archived` is already archived for the unarchive operation, and
+# `disposable` is deleted by the DELETE operation.
 path_parameters:
   defaults:
     - path_prefix: /agents
@@ -34,14 +35,14 @@ path_parameters:
     archiveConversation:
       conversationId: conversation.archivable.id
     unarchiveConversation:
-      conversationId: conversation.archivable.id
+      conversationId: conversation.archived.id
     deleteConversationById:
       conversationId: conversation.disposable.id
 
     archiveSearch:
       searchId: search.archivable.id
     unarchiveSearch:
-      searchId: search.archivable.id
+      searchId: search.archived.id
     deleteSearchById:
       searchId: search.disposable.id
 
@@ -54,7 +55,7 @@ path_parameters:
     archiveAgentConversation:
       conversationId: agentConversation.archivable.id
     unarchiveAgentConversation:
-      conversationId: agentConversation.archivable.id
+      conversationId: agentConversation.archived.id
     deleteAgentConversationById:
       conversationId: agentConversation.disposable.id
 

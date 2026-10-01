@@ -50,6 +50,12 @@ class OperationRun:
     state: str
     reason: str = ""
     no_success_reason: str = ""
+    # ID fields that keep a generated value; see results._names_nothing_real.
+    waived_fields: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> OperationRun:
+        return cls(**{**data, "waived_fields": tuple(data.get("waived_fields") or ())})
 
     @property
     def label(self) -> str:
@@ -95,6 +101,7 @@ def plan_run(
                 state=state,
                 reason=reason,
                 no_success_reason=planned.no_success_reason,
+                waived_fields=planned.waived_fields,
             )
         )
     return runs

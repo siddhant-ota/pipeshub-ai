@@ -37,6 +37,8 @@ class PlannedOperation:
     path_values: dict[str, str] = field(default_factory=dict)
     # request field (`body.filters.kb[*]`) -> value key
     field_values: dict[str, str] = field(default_factory=dict)
+    # ID fields of this operation that keep a generated value
+    waived_fields: tuple[str, ...] = ()
 
     @property
     def value_keys(self) -> set[str]:
@@ -77,8 +79,7 @@ def _path_values(operation: Operation, rules: dict[str, Any]) -> dict[str, str]:
             defaults = rule.get("values") or {}
             break
     return {
-        name: overrides.get(name) or defaults.get(name) or ""
-        for name in operation.path_parameters
+        name: overrides.get(name) or defaults.get(name) or "" for name in operation.path_parameters
     }
 
 
@@ -156,6 +157,9 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
                     for request_field in fields
                     if request_field.name in values
                 },
+                waived_fields=tuple(
+                    request_field.name for request_field in fields if request_field.name in waived
+                ),
             )
         )
 
