@@ -18,7 +18,12 @@ rate_limit: 300/m
 
 # Roles keep the operations apart, in whatever order they run: `readonly` is
 # only read, `mutable` is updated, and `disposable` is deleted or revoked by
-# the DELETE operation under test. The admin revocation has its own token.
+# the DELETE operation under test.
+#
+# The two revocations of a personal access token each have a pool of tokens,
+# one for each request. The API does not look at the body of a revocation, so
+# with one token the first request would revoke it and every later one would
+# get 404, whatever its body.
 path_parameters:
   defaults:
     - path_prefix: /service-accounts
@@ -42,19 +47,23 @@ path_parameters:
 values:
   query.serviceAccountId: serviceAccount.readonly.id
   body.serviceAccountId: serviceAccount.readonly.id
-  # The API accepts only scopes that the deployment allows (MCP_SCOPES); a
-  # random string is answered with 400. The value hides that the spec allows
-  # any text as a scope.
-  body.scopes[*]: scope.name
-  # A slug that an account already has is answered with 409, also when an
-  # earlier run that stopped early left the account behind. This value is new
-  # in each run and in each request, so every valid createServiceAccount can
-  # succeed. It hides the shortest and the longest slug that the spec allows
-  # (3 and 48 characters): no valid request is sent with them.
+  # A slug that a live account has is answered with 409. Each request gets a
+  # slug of its own, so every valid createServiceAccount can succeed. The
+  # slugs are the same in every run: DELETE only marks an account, and a
+  # create with the slug of a deleted account brings that record back, so the
+  # runs use the same records again and leave no new ones. The value hides
+  # the shortest and the longest slug that the spec allows (3 and 48
+  # characters): no valid request is sent with them.
   body.slug: serviceAccount.created.slug
 
-constants:
-  scope.name: openid
+# The API accepts only scopes that the deployment allows (MCP_SCOPES; a service
+# token cannot have `agent:execute`); a random string is answered with 400.
+# The value hides that the spec allows any text as a scope.
+values_by_operation:
+  createPersonalAccessToken:
+    body.scopes[*]: scope.personalAccessToken.name
+  createServiceToken:
+    body.scopes[*]: scope.serviceToken.name
 
 # An empty list says nothing about the schema of its items.
 requires:
@@ -68,8 +77,14 @@ requires:
     - serviceToken.readonly.id
 
 # The response of createPersonalAccessToken and of createServiceToken has the
-# raw token, in `token.accessToken`. The library masks it in the files of a
-# run, and the tokens are revoked at the end of the run.
+# raw token, in `token.accessToken`. The library masks credentials in the
+# files of a run by field name and by the shape of a token (bodies, headers,
+# the log, check messages), and the tokens are revoked at the end of the run.
+# Treat the report folder as sensitive all the same.
+#
+# The 201 of createServiceToken will fail the schema check in every run, and
+# rightly so: `ServiceToken` in the spec has `additionalProperties: false`
+# and no `accessToken`, which `ServiceTokenWithSecret` adds next to it.
 created_resources:
   - operation: createPersonalAccessToken
     id_pointer: /token/id

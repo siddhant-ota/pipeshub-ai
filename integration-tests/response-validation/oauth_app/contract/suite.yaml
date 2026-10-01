@@ -43,10 +43,13 @@ path_parameters:
     deleteOAuthApp:
       appId: app.disposable.id
 
-# setOAuthAppTokenIdentity logs in with the OAuth client, because the spec
-# lists `oauth2` for it. The router accepts only a user session
-# (requireSessionAuth), so every request is answered with 403 and the
-# operation stays "Unverified" until the spec lists only `bearerAuth`.
+# A difference between the spec and the API that a run cannot report: the spec
+# lists `oauth2: [user:write]` for setOAuthAppTokenIdentity, and the router
+# accepts only a user session (requireSessionAuth, oauth.clients.routes.ts)
+# and answers an OAuth token with 403. With the login of the spec no request
+# could succeed, so the operation logs in the way the API accepts.
+auth:
+  setOAuthAppTokenIdentity: session
 
 values:
   body.serviceAccountId: serviceAccount.identity.id
@@ -69,8 +72,15 @@ requires:
 
 # The response of createOAuthApp (`app.clientSecret`) and of
 # regenerateOAuthAppSecret (`clientSecret`) has a client secret. The library
-# masks it in the files of a run, and the apps are deleted at the end of the
-# run. An app name does not have to be unique, so `body.name` gets no value.
+# masks credentials in the files of a run by field name and by the shape of a
+# token (bodies, headers, the log, check messages), and the apps are deleted
+# at the end of the run. Treat the report folder as sensitive all the same.
+#
+# An app name does not have to be unique, so `body.name` gets no value.
+#
+# DELETE only marks an app as deleted, and the API has no other way to remove
+# one. Each run leaves about 49 such records: the 7 apps of the fixtures and
+# up to 42 that the valid createOAuthApp cases create.
 created_resources:
   - operation: createOAuthApp
     id_pointer: /app/id

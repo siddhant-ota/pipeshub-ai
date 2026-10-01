@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import requests
 
 from helper.clients.oauth_client import OAuthAppsClient, OAuthProviderClient
 from helper.contract.pytest_support import delete_quietly, response_body, suite_fixtures
@@ -35,6 +37,10 @@ APP_ROLES = (
 # The apps that hold an access token: one for the token list, one for the revocation.
 TOKEN_ROLES = ("readonly", "revocable")
 _SERVICE_ACCOUNTS = "/api/v1/service-accounts"
+# The same slug in every run, and one that only this suite uses. A delete only marks a
+# service account, and a create with the slug of a deleted one brings that record back.
+# So every run uses one record again; a new slug in each run would leave one more each time.
+IDENTITY_SLUG = "contract-oauth-apps-identity"
 
 
 def _name(role: str) -> str:
@@ -98,19 +104,27 @@ def contract_oauth_app_tokens(
 
 @pytest.fixture(scope="module")
 def contract_service_account(user_session_client: SessionClient) -> Iterator[str]:
-    name = _name("identity")
+    def _delete(account_id: str) -> requests.Response:
+        return user_session_client.request("DELETE", f"{_SERVICE_ACCOUNTS}/{account_id}")
+
+    listed = response_body(
+        user_session_client.request("GET", _SERVICE_ACCOUNTS), (200,), "List service accounts"
+    )
+    # A run that stopped early left its account live, and a create would be answered with 409.
+    for account in listed.get("serviceAccounts") or []:
+        if account.get("slug") == IDENTITY_SLUG and account.get("id"):
+            delete_quietly(
+                "service account of an earlier run", partial(_delete, str(account["id"]))
+            )
     resp = user_session_client.request(
-        "POST", _SERVICE_ACCOUNTS, json={"slug": name, "fullName": name}
+        "POST", _SERVICE_ACCOUNTS, json={"slug": IDENTITY_SLUG, "fullName": IDENTITY_SLUG}
     )
     account_id = response_body(resp, (201,), "Create service account").get("id")
     assert account_id, "Create service account: response has no id"
     try:
         yield str(account_id)
     finally:
-        delete_quietly(
-            "service account",
-            lambda: user_session_client.request("DELETE", f"{_SERVICE_ACCOUNTS}/{account_id}"),
-        )
+        delete_quietly("service account", partial(_delete, str(account_id)))
 
 
 # unit/test_contract_fixtures.py checks that these keys cover every key suite.yaml uses.
@@ -120,7 +134,8 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         tuple(f"app.{role}.id" for role in APP_ROLES),
         lambda apps: tuple(apps[role]["id"] for role in APP_ROLES),
         "Seven OAuth apps of the test user: to read, to update, to suspend, already suspended "
-        "(to activate), to get a new secret, to lose its tokens, and to delete.",
+        "(to activate), to get a new secret, to lose its tokens, and to delete. The teardown "
+        "deletes them, which only marks them as deleted: their seven records stay.",
     ),
     ValueSource(
         "contract_oauth_app_tokens",
@@ -133,7 +148,8 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         "contract_service_account",
         ("serviceAccount.identity.id",),
         lambda account_id: (account_id,),
-        "One service account, to point the tokens of an app at.",
+        "One service account, to point the tokens of an app at. It has the same slug in every "
+        f"run (`{IDENTITY_SLUG}`), so every run uses the same record again.",
     ),
 )
 
