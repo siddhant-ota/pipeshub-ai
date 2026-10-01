@@ -1,0 +1,50 @@
+# Contract-test suite: in-app notifications of the calling user.
+# Routes: backend/nodejs/apps/src/modules/notification/routes/notification.routes.ts
+# The keys on the right-hand side (`notification.archivable.id`, ...) are
+# produced by `contract_values` in conftest.py.
+#
+# The spec accepts only `bearerAuth` here, so every request carries the session
+# token of the test user, and the notifications are that user's.
+#
+# The routes have no rate limiter of their own. The 429 in the spec is the
+# global limiter of the API (MAX_REQUESTS_PER_MINUTE, 1,000 by default); the
+# 600 requests per minute of the library stay under it.
+
+name: notifications
+
+include_path_regex: "^/notifications(/|$)"
+
+# One notification per operation, so that they cannot disturb each other in
+# whatever order they run: `archivable` is archived by the archive operation,
+# `archived` already is for the unarchive operation, and `disposable` is
+# dismissed by the DELETE operation.
+path_parameters:
+  operations:
+    markInAppNotificationRead:
+      id: notification.markRead.id
+    markInAppNotificationUnread:
+      id: notification.markUnread.id
+    archiveInAppNotification:
+      id: notification.archivable.id
+    unarchiveInAppNotification:
+      id: notification.archived.id
+    dismissInAppNotification:
+      id: notification.disposable.id
+
+values:
+  query.cursor: notification.wellFormedCursor
+
+constants:
+  # The API answers 400 to a cursor that is not base64url of
+  # {"c": <ISO time>, "i": <ObjectId>} (decodeCursor in notification-api.utils.ts).
+  # It issues one only when a list has a second page, which the test user may not
+  # have. This one is {"c":"2999-01-01T00:00:00.000Z","i":"ffffffffffffffffffffffff"}:
+  # well-formed, and later than every notification, so the list starts at the newest.
+  notification.wellFormedCursor: eyJjIjoiMjk5OS0wMS0wMVQwMDowMDowMC4wMDBaIiwiaSI6ImZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZiJ9
+
+# `PATCH /notifications/read-all` marks every unread notification of the user
+# as read, not only the ones of this suite. The fixture behind this key reads
+# which ones are unread first, and marks them unread again at the end.
+requires:
+  markAllInAppNotificationsRead:
+    - notification.unreadBefore.count
