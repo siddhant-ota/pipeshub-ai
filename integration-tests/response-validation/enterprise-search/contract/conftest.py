@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,12 @@ _CONVERSATION_IDS = ("id", "botMessageId")
 _LLM_TIMEOUT_SEC = 180
 _SPEECH_CAPABILITIES = "/api/v1/chat/speech/capabilities"
 NO_PROVIDER = "none"
+_PAGE_SIZE = 100
+# A search with no `limit` is answered 500 after its LLM calls: the validator takes the field
+# as optional (es_validators.ts) and the save needs it (search.schema.ts).
+_SEARCH_LIMIT = 5
+
+logger = logging.getLogger("contract")
 
 
 def _conversation_ids(resp: requests.Response, what: str) -> dict[str, str]:
@@ -177,12 +184,62 @@ def _delete_projects(projects_client: ProjectsClient, created: dict[str, str]) -
         )
 
 
+def _delete_conversations_in(
+    project_id: str,
+    projects_client: ProjectsClient,
+    conversations_client: ConversationsClient,
+    agent_conversations_client: AgentConversationsClient,
+) -> None:
+    """Delete the conversations that the test cases left in the project.
+
+    A stream operation saves its conversation and answers 200 before it calls the LLM, and a
+    create whose LLM call fails keeps its conversation. Neither answer has the ID in a JSON
+    body, so `created_resources` cannot find the conversation. Every such request that the
+    API can accept has `projectId`, so the conversation is in this project. The one request
+    without it is the example of `createAgentConversation`.
+
+    A `mutable` fixture conversation is here too if the operation under test linked it. Its
+    own fixture then gets a 404 for its delete, which `delete_quietly` takes as done.
+    """
+    tried: set[str] = set()
+    while True:
+        try:
+            resp = projects_client.list_project_conversations(project_id, limit=_PAGE_SIZE)
+            rows = response_body(resp, (200,), "List project conversations").get("conversations")
+        except (AssertionError, requests.RequestException, ValueError) as exc:
+            logger.warning("Could not list the conversations of project %s: %s", project_id, exc)
+            return
+        left = [row for row in rows or [] if str(row.get("_id")) not in tried]
+        if not left:
+            return
+        for row in left:
+            conversation_id, agent_key = str(row.get("_id")), row.get("agentKey")
+            tried.add(conversation_id)
+            # DELETE /conversations/{id} finds no agent conversation (es_controller.ts).
+            delete_quietly(
+                f"conversation {conversation_id} in the project",
+                lambda conversation_id=conversation_id, agent_key=agent_key: (
+                    agent_conversations_client.delete_conversation(agent_key, conversation_id)
+                    if agent_key
+                    else conversations_client.delete_conversation(conversation_id)
+                ),
+            )
+
+
 @pytest.fixture(scope="module")
-def contract_project(projects_client: ProjectsClient) -> Iterator[str]:
+def contract_project(
+    projects_client: ProjectsClient,
+    conversations_client: ConversationsClient,
+    agent_conversations_client: AgentConversationsClient,
+) -> Iterator[str]:
     project_id = _create_project(projects_client, "linked")
     try:
         yield project_id
     finally:
+        # Before the project: its delete takes every conversation out of it (project.service.ts).
+        _delete_conversations_in(
+            project_id, projects_client, conversations_client, agent_conversations_client
+        )
         _delete_projects(projects_client, {"linked": project_id})
 
 
@@ -282,7 +339,7 @@ def contract_searches(search_client: SearchClient, session_kb: Any) -> Iterator[
     try:
         for role in SEARCH_ROLES:
             resp = search_client.search(
-                f"contract {role} {uuid4().hex[:8]}", timeout=_LLM_TIMEOUT_SEC
+                f"contract {role} {uuid4().hex[:8]}", limit=_SEARCH_LIMIT, timeout=_LLM_TIMEOUT_SEC
             )
             search_id = response_body(resp, (200, 201), f"Create search ({role})").get("searchId")
             assert search_id, f"Create search ({role}): response has no searchId"
@@ -327,7 +384,7 @@ def contract_second_user_history(
             json={
                 "query": f"contract history {uuid4().hex[:8]}",
                 "filters": {"kb": [kb_id]},
-                "limit": 5,
+                "limit": _SEARCH_LIMIT,
             },
             timeout=_LLM_TIMEOUT_SEC,
         )
@@ -414,15 +471,16 @@ def contract_speech_capabilities(pipeshub_client: Any) -> dict[str, Any]:
 
 
 def _no_provider(capabilities: dict[str, Any], kind: str, name: str) -> str:
-    """`NO_PROVIDER`, or a skip: with a provider, the requests of the run would call it.
+    """`NO_PROVIDER`, or a skip of the operation: this deployment has a provider.
 
-    Also the invalid ones. The API does not reject an unknown `format` or a `speed`
-    out of range; it takes mp3 and clamps the speed, and then calls the provider.
+    With a provider, the requests of the run would call it, also the invalid ones. The API
+    does not reject an unknown `format` or a `speed` out of range; it takes mp3 and clamps
+    the speed, and then calls the provider.
     """
     if capabilities.get(kind) is not None:
         pytest.skip(
-            f"A {name} provider is configured. Requests to the operation would call it, "
-            "and that costs money."
+            f"A {name} provider is configured on this deployment. Requests to the operation "
+            "would call it, and that costs money."
         )
     return NO_PROVIDER
 
@@ -526,7 +584,9 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         "contract_project",
         ("project.id",),
         lambda project_id: (project_id,),
-        "One project, to link conversations to. The project operations only read it.",
+        "One project, to link conversations to. The project operations only read it. At the "
+        "end the fixture deletes every conversation that is in it, also those that test "
+        "cases left there.",
     ),
     ValueSource(
         "contract_projects",
@@ -565,33 +625,39 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         ("attachment.file.path",),
         lambda path: (str(path),),
         "A small text file in a temporary folder of the test run, to upload as a chat "
-        "attachment. It creates nothing on the deployment.",
+        "attachment. The fixture creates nothing on the deployment. Each upload of the file "
+        "leaves a stored copy there: the delete of an attachment removes its record, not "
+        "the file in the storage.",
     ),
     ValueSource(
         "contract_attachment",
         ("attachment.disposable.id",),
         lambda record_id: (record_id,),
-        "One chat attachment, the text file uploaded through the assistant route, to delete.",
+        "One chat attachment, the text file uploaded through the assistant route, to delete. "
+        "Its stored file stays in the storage.",
     ),
     ValueSource(
         "contract_agent_attachment",
         ("agentAttachment.disposable.id",),
         lambda record_id: (record_id,),
-        "One chat attachment, the text file uploaded through the agent route, to delete.",
+        "One chat attachment, the text file uploaded through the agent route, to delete. "
+        "Its stored file stays in the storage.",
     ),
     ValueSource(
         "contract_no_tts_provider",
         ("speech.tts.provider",),
         lambda provider: (provider,),
-        "Reads the speech capabilities and fails if a text-to-speech provider is configured, "
-        "so that no request of the run can call one. It creates nothing.",
+        "Reads the speech capabilities. If a text-to-speech provider is configured, the "
+        "operation is skipped, so that no request of the run can call the provider. It "
+        "creates nothing.",
     ),
     ValueSource(
         "contract_no_stt_provider",
         ("speech.stt.provider",),
         lambda provider: (provider,),
-        "Reads the speech capabilities and fails if a speech-to-text provider is configured, "
-        "so that no request of the run can call one. It creates nothing.",
+        "Reads the speech capabilities. If a speech-to-text provider is configured, the "
+        "operation is skipped, so that no request of the run can call the provider. It "
+        "creates nothing.",
     ),
 )
 

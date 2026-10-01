@@ -119,6 +119,13 @@ values:
   body.appliedFilters.kb[*].id: knowledgeBase.id
   body.appliedFilters.apps[*].id: knowledgeBase.id
   body.modelKey: llm.modelKey
+  # The API wants a model name and a friendly name that are not empty
+  # (es_validators.ts, modelFieldsSchema). `AddMessageRequest` in the spec has
+  # no `minLength` for the two, so Schemathesis sends "" in every request of
+  # `addMessage` and `addMessageStream`, and the API would reject each of them
+  # for the name and not for its invalid part. The values hide that gap.
+  body.modelName: llm.modelName
+  body.modelFriendlyName: llm.modelName
   # An agent model is a (modelKey, modelName, provider) triple; a real key with
   # a random name or provider is still not a model that exists.
   body.models[*].modelKey: llm.modelKey
@@ -150,6 +157,12 @@ values_by_operation:
     body.tools[*]: project.toolName
   updateProject:
     body.tools[*]: project.toolName
+  # For an agent the API accepts `quick` only, and so does the spec
+  # (`AgentRegenerateRequest`). Schemathesis takes `internal_search` from the
+  # example of `RegenerateRequest`, which the agent schema extends, and the API
+  # would reject each request for the chat mode and not for its invalid part.
+  regenerateAgentConversationMessage:
+    body.chatMode: chatMode.quick
 
 # Values that the suite file gives itself.
 constants:
@@ -159,6 +172,7 @@ constants:
   # invalid request, which would hide whether it rejects the invalid part.
   record.wellFormedId: "000000000000000000000000"
   project.toolName: contract.tool
+  chatMode.quick: quick
 
 # ID fields whose value the client is free to choose. They keep the generated
 # value, and a request with one is judged like any other.
@@ -175,11 +189,12 @@ client_chosen_ids:
 # names nothing real. If the API rejects it, that is not counted as a
 # difference; the report says how many such requests there were.
 ids_without_fixture:
-  # Only the operations that call the LLM have these two, and they are sent
-  # invalid requests only. The API checks the form of an attachment reference,
-  # not that the attachment exists (es_validators.ts, attachmentRefSchema), so a
-  # real ID changes no rejection. In an invalid request that the API accepts, a
-  # real ID would put the file into the LLM turn.
+  # Only the operations that call the LLM have these two. They are sent invalid
+  # requests, and at most one example, which has no attachment. The API checks
+  # the form of an attachment reference, not that the attachment exists
+  # (es_validators.ts, attachmentRefSchema), so a real ID changes no rejection.
+  # In an invalid request that the API accepts, a real ID would put the file
+  # into the LLM turn.
   - field: body.attachments[*].recordId
     reason: A real attachment would change no rejection, and add its file to an LLM turn.
   - field: body.attachments[*].virtualRecordId
@@ -193,29 +208,53 @@ ids_without_fixture:
   - field: body.knowledge[*].filters.recordGroups[*]
     reason: A knowledge base is addressed as an app (connectorId); there is no record-group fixture.
 
-# Only invalid requests are sent. The backend must reject them before it
-# reaches the LLM, so these runs cost nothing and still check validation.
-# The success response of these operations is not checked.
+# Only invalid requests are sent, and the success response is not checked.
+#
+# This costs nothing only while the API rejects each of these requests. It
+# starts an LLM turn for every invalid request that it accepts, and the run
+# reports that request as a difference. The API drops a property that the spec
+# does not know and handles the request, so the library sends that one case
+# without a login. A stream operation saves its conversation and answers 200
+# before it calls the LLM; `contract_project` deletes those conversations.
 negative_only:
-  - reason: A valid request calls the LLM.
+  - reason: A valid request calls the LLM, and the answer is a stream.
     operations:
-      - createConversation
       - streamChat
-      - addMessage
       - addMessageStream
       - regenerateAnswer
-      - createAgentConversation
       - streamAgentConversation
-      - addAgentConversationMessage
       - streamAgentConversationMessage
       - regenerateAgentConversationMessage
 
-# All invalid requests are sent. Of the valid ones, only the examples that the
-# spec gives, so the success response is still checked.
+# All invalid requests are sent. Of the valid ones, only the examples of the
+# spec, so the success response is still checked.
 examples_only:
+  # A run sends 2 examples, which is 4 LLM calls. The fixtures make 5 more
+  # searches (10 LLM calls). Both examples have a `limit`: a search with no
+  # `limit` is answered 500, after the LLM calls. `limit` is optional for the
+  # validator (es_validators.ts, enterpriseSearchSearchSchema) and required
+  # when the search is saved (search.schema.ts).
   - reason: Every valid search makes two LLM calls (query rewrite and expansion).
     operations:
       - search
+  # The spec has no request example for these four. Schemathesis makes one from
+  # the examples of the fields, so a run sends 1 valid request to each of them:
+  # 4 LLM turns.
+  - reason: A valid request is one LLM turn.
+    operations:
+      - createConversation
+      - addMessage
+      - createAgentConversation
+      - addAgentConversationMessage
+
+# An LLM turn or a search can take longer than the 60 seconds that a request
+# gets by default. The fixtures give the same calls 180 seconds.
+operation_timeouts:
+  search: 180
+  createConversation: 180
+  addMessage: 180
+  createAgentConversation: 180
+  addAgentConversationMessage: 180
 
 # Sent in full, and still no request can get a 2xx.
 no_success_response:
@@ -243,7 +282,7 @@ requires:
   # With a provider, a valid request calls it and costs money. So does an invalid
   # one: the API takes an unknown `format` as mp3 and clamps `speed`, it does not
   # reject them (backend/python/app/api/routes/speech.py). The fixture behind the
-  # key fails when a provider is configured, and the operation is then not sent.
+  # key skips when a provider is configured, and the operation is then skipped.
   synthesizeChatSpeech:
     - speech.tts.provider
   transcribeChatAudio:
@@ -265,7 +304,7 @@ created_resources:
   - operation: createProject
     id_pointer: /project/_id
     delete_path: /projects/{id}
-  # Negative-only, but the backend can accept a request that the spec forbids.
+  # One valid example each, and the API can accept a request that the spec forbids.
   - operation: createConversation
     id_pointer: /conversation/_id
     delete_path: /conversations/{id}

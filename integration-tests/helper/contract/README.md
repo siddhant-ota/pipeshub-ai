@@ -160,6 +160,7 @@ spec and fails, before any request is sent, when they do not agree.
 | `requires` | Value keys an operation needs that go into no request, for example a fixture that saves a setting and puts it back |
 | `auth` | How an operation logs in, where the spec does not decide it (see below) |
 | `rate_limit`, `operation_rate_limits` | A lower request rate for the suite or for one operation, for example `30/m` |
+| `operation_timeouts` | Seconds to wait for the answer of one operation that is slower than the default of 60, for example a chat turn |
 
 A path parameter needs a value key unless the spec lists its values (`enum`):
 Schemathesis sends every listed value by itself.

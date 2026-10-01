@@ -73,6 +73,8 @@ class PlannedOperation:
     token_key: str = ""
     # For example `10/m`, for an operation with a stricter limit than the rest of the API.
     rate_limit: str = ""
+    # Seconds to wait for an answer, for an operation that is slower than the rest; 0: the default.
+    request_timeout: int = 0
     # header name -> value key. Every request of the operation carries these headers: one
     # that the API needs and the spec does not describe (`Accept` for a stream), or one whose
     # value only a fixture has (a sign-in session).
@@ -217,6 +219,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
     without_fixture = _fields_by_name(raw, _WITHOUT_FIXTURE)
     logins: dict[str, Any] = raw.get("auth") or {}
     rate_limits: dict[str, str] = raw.get("operation_rate_limits") or {}
+    timeouts: dict[str, int] = raw.get("operation_timeouts") or {}
     requires: dict[str, list[str]] = raw.get("requires") or {}
     headers: dict[str, dict[str, str]] = raw.get("headers") or {}
     last: list[str] = raw.get("last") or []
@@ -227,6 +230,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
         *values_by_operation,
         *logins,
         *rate_limits,
+        *timeouts,
         *requires,
         *headers,
         *last,
@@ -327,6 +331,7 @@ def load_suite(path: Path, spec: dict[str, Any] | None = None) -> Suite:
                 auth=auth,
                 token_key=token_key,
                 rate_limit=str(rate_limits.get(operation_id) or ""),
+                request_timeout=int(timeouts.get(operation_id) or 0),
                 required_keys=tuple(requires.get(operation_id) or ()),
                 header_values=dict(headers.get(operation_id) or {}),
                 last=operation_id in last,

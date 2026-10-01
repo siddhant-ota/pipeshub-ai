@@ -48,7 +48,7 @@ PLANNED = {
     "POST /search": "search",
     "GET /search": "searchHistory",
     "GET /conversations": "getAllConversations",
-    "POST /conversations/create": "createConversation",
+    "POST /conversations/stream": "streamChat",
     "PUT /conversations/{conversationId}/project": "setConversationProject",
 }
 ALL_VALUES = ContractValues(
@@ -233,6 +233,15 @@ def test_rate_limits_of_the_suite_and_of_an_operation(tmp_path: Path) -> None:
     assert {"include-operation-id": "listThings", "rate-limit": "5/m"} in config["operations"]
 
 
+def test_a_slow_operation_gets_more_time_to_answer(tmp_path: Path) -> None:
+    suite = load_suite(write_suite(tmp_path, operation_timeouts={"listThings": 180}), SPEC)
+
+    config = build_config(suite, plan_run(suite, ALL_VALUES))
+
+    assert {"include-operation-id": "listThings", "request-timeout": 180} in config["operations"]
+    assert config["request-timeout"] == 60
+
+
 def test_each_operation_logs_in_the_way_the_suite_says(tmp_path: Path) -> None:
     suite = load_suite(
         write_suite(
@@ -367,7 +376,7 @@ def test_schemathesis_tests_the_boundaries_of_a_range(planned_cases: dict[str, l
 
 
 def test_a_negative_only_operation_sends_no_valid_request(planned_cases: dict[str, list]) -> None:
-    assert all(case.is_negative for case in planned_cases["POST /conversations/create"])
+    assert all(case.is_negative for case in planned_cases["POST /conversations/stream"])
 
 
 def test_an_examples_only_operation_sends_the_spec_examples_as_its_valid_requests(

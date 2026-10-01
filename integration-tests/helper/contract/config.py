@@ -156,6 +156,8 @@ def build_config(suite: Suite, runs: list[OperationRun]) -> dict[str, Any]:
             continue
         if planned.rate_limit:
             block["rate-limit"] = planned.rate_limit
+        if planned.request_timeout:
+            block["request-timeout"] = planned.request_timeout
         if run.state in (STATE_NEGATIVE_ONLY, STATE_EXAMPLES_ONLY):
             # This limits the coverage phase to invalid requests. The examples phase still
             # sends the spec's own examples, which are valid requests. (A mode set for the
