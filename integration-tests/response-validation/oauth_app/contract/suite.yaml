@@ -1,0 +1,77 @@
+# Contract-test suite: OAuth apps (the OAuth clients a user registers).
+# Routes: backend/nodejs/apps/src/modules/oauth_provider/routes/oauth.clients.routes.ts
+# The keys on the right-hand side (`app.mutable.id`, ...) are produced by
+# `contract_values` in conftest.py.
+#
+# The test session itself logs in with an OAuth app ("Integration Test Client").
+# No operation here gets its ID: every `appId` is an app that a fixture of this
+# suite created.
+
+name: oauth-apps
+
+include_path_regex: "^/oauth-clients(/|$)"
+
+# All routes share one limiter for each user: MAX_OAUTH_CLIENT_REQUESTS_PER_MINUTE,
+# 1,000 by default (createOAuthClientRateLimiter, tokens_manager/config/config.ts).
+# The fixtures and the cleanup count against it too.
+rate_limit: 300/m
+
+# Roles keep the operations apart, in whatever order they run: `readonly` is
+# only read, `mutable` is updated, `suspendable` is suspended by the suspend
+# operation, `suspended` is already suspended for the activate operation,
+# `rotatable` gets a new secret, `revocable` loses its tokens, and `disposable`
+# is deleted by the DELETE operation.
+path_parameters:
+  defaults:
+    - path_prefix: /oauth-clients
+      values:
+        appId: app.readonly.id
+
+  operations:
+    updateOAuthApp:
+      appId: app.mutable.id
+    setOAuthAppTokenIdentity:
+      appId: app.mutable.id
+    suspendOAuthApp:
+      appId: app.suspendable.id
+    activateOAuthApp:
+      appId: app.suspended.id
+    regenerateOAuthAppSecret:
+      appId: app.rotatable.id
+    revokeAllOAuthAppTokens:
+      appId: app.revocable.id
+    deleteOAuthApp:
+      appId: app.disposable.id
+
+# setOAuthAppTokenIdentity logs in with the OAuth client, because the spec
+# lists `oauth2` for it. The router accepts only a user session
+# (requireSessionAuth), so every request is answered with 403 and the
+# operation stays "Unverified" until the spec lists only `bearerAuth`.
+
+values:
+  body.serviceAccountId: serviceAccount.identity.id
+  # The API accepts only scopes that exist; a random string is answered with
+  # 400. The value hides that the spec allows any text as a scope.
+  body.allowedScopes[*]: scope.name
+
+constants:
+  scope.name: openid
+
+# An empty list says nothing about the schema of its items, and a revocation
+# without a token revokes nothing.
+requires:
+  listOAuthApps:
+    - app.readonly.id
+  listOAuthAppTokens:
+    - app.readonly.tokenId
+  revokeAllOAuthAppTokens:
+    - app.revocable.tokenId
+
+# The response of createOAuthApp (`app.clientSecret`) and of
+# regenerateOAuthAppSecret (`clientSecret`) has a client secret. The library
+# masks it in the files of a run, and the apps are deleted at the end of the
+# run. An app name does not have to be unique, so `body.name` gets no value.
+created_resources:
+  - operation: createOAuthApp
+    id_pointer: /app/id
+    delete_path: /oauth-clients/{id}
