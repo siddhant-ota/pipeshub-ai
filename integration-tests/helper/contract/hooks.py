@@ -162,7 +162,9 @@ def _real_part(part: Any, path: Path) -> Any:
     return (*real, content_type) if content_type else real
 
 
-def _send_real_files(case: schemathesis.Case, kwargs: dict[str, Any]) -> None:
+def _send_real_files(
+    case: schemathesis.Case, kwargs: dict[str, Any], mutation: Mutation | None
+) -> None:
     """Send a real file where the body has a file field that the suite gives a file for.
 
     Schemathesis generates an empty file and names it after its form field. An API that looks
@@ -176,7 +178,6 @@ def _send_real_files(case: schemathesis.Case, kwargs: dict[str, Any]) -> None:
     }
     if not isinstance(case.body, dict) or not set(files) & set(case.body):
         return
-    mutation = _mutation(case, BODY)
     body = prepare_body(case)
     if not isinstance(body, dict):
         return
@@ -218,7 +219,7 @@ def before_call(
         substitution.location: _mutation(case, substitution.location)
         for substitution in substitutions
     }
-    _send_real_files(case, kwargs)
+    body_mutation = _mutation(case, BODY)
     for substitution in substitutions:
         if is_under_test(substitution, mutations[substitution.location]):
             continue
@@ -231,3 +232,5 @@ def before_call(
         replaced, count = substitute(getattr(case, attribute), substitution)
         if count:
             setattr(case, attribute, replaced)
+    # After the values: the file parts are built from the body, with the other fields of the form.
+    _send_real_files(case, kwargs, body_mutation)

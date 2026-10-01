@@ -679,3 +679,37 @@ def test_an_operation_can_be_sent_after_all_others(
     count = in_spec_order.count(first)
     assert set(moved[-count:]) == {first}
     assert first not in moved[:-count]
+
+
+def test_a_form_field_next_to_a_real_file_gets_its_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file parts are built from the whole form, so the values must be in it first."""
+    document = tmp_path / "contract-document.txt"
+    document.write_text("a real document", encoding="utf-8")
+
+    folder = _planned(
+        tmp_path,
+        monkeypatch,
+        include_path_regex=r"^/knowledgeBase/\{kbId\}/upload$",
+        path_parameters={"defaults": [{"path_prefix": "/", "values": {"kbId": "kb.id"}}]},
+        values={},
+        values_by_operation={
+            "uploadRecords": {
+                "body.files[*]": "document.path",
+                "body.files_metadata": "document.metadata",
+            }
+        },
+        constants={"document.path": str(document), "document.metadata": "contract-metadata"},
+        ids_without_fixture=[{"field": "query.folderId", "reason": "Not needed for this test."}],
+    )
+    with_file = [
+        case
+        for case in read_cases(folder / "events.ndjson")
+        if 'filename="contract-document.txt"' in case.request_body
+    ]
+
+    assert with_file
+    with_metadata = [case for case in with_file if 'name="files_metadata"' in case.request_body]
+    assert with_metadata
+    assert all("contract-metadata" in case.request_body for case in with_metadata)
