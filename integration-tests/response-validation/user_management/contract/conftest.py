@@ -39,11 +39,19 @@ logger = logging.getLogger("contract")
 
 # One resource per role, so that an update or a delete under test cannot change
 # what another operation reads, in whatever order they run. `member` is the user
-# that the membership operations add and remove: the `joinable` group does not
-# have it, the `leavable` group does.
+# that the membership operations add and remove: the `joinable` groups do not
+# have it, the `leavable` groups do.
 USER_ROLES = ("readonly", "mutable", "disposable", "member")
-GROUP_ROLES = ("readonly", "mutable", "disposable", "joinable", "leavable")
+GROUP_ROLES = ("readonly", "mutable", "disposable")
+GROUP_POOLS = ("joinable", "leavable")
 TEAM_ROLES = ("readonly", "mutable", "disposable")
+
+# The API answers 400 to an add or a remove that changes nothing (userGroups.controller.ts),
+# so each request that it accepts needs a group of its own. A request takes the group at
+# its place among the requests of the operation. Of the 36 requests of each of the two
+# operations, the API accepts the 28th (an unknown property, which it drops) and the last
+# three; the pool is longer than the 9 places from the first of them to the last.
+_GROUP_POOL_SIZE = 16
 
 # Reserved (RFC 2606): no mail to a fixture user can reach anyone.
 _EMAIL_DOMAIN = "example.com"
@@ -118,13 +126,24 @@ def contract_users(users_client: UsersClient) -> Iterator[dict[str, dict[str, st
 def contract_new_names() -> dict[str, str]:
     """Names for what the test cases create. The API refuses an email or a group name twice.
 
-    `{case}` becomes the number of the request (helper/contract/values.py).
+    `{case}` becomes the number of the request (helper/contract/values.py). The address is
+    one of the demo domain, the only one for which createUser takes a password.
     """
     return {
-        "email": f"{_name('new')}-{{case}}@{_EMAIL_DOMAIN}",
+        "email": f"{_name('new')}-{{case}}@{_DEMO_EMAIL_DOMAIN}",
         "group": f"{_name('new')}-{{case}}",
         "renamed": f"{_name('renamed')}-{{case}}",
     }
+
+
+def _strong_password() -> str:
+    """One that passes the API's rule: upper and lower case, a digit, a special character."""
+    return f"Aa1!{uuid4().hex}"
+
+
+@pytest.fixture(scope="module")
+def contract_new_password() -> str:
+    return _strong_password()
 
 
 @pytest.fixture(scope="module")
@@ -184,7 +203,7 @@ def _dismiss_invite_notifications(client: HTTPClientProtocol, address: str) -> N
 def contract_invite_file(
     pipeshub_client: HTTPClientProtocol,
     tmp_path_factory: pytest.TempPathFactory,
-    smtp_configured: None,
+    smtp_ready: str,
 ) -> Iterator[str]:
     """A CSV file for bulkInviteUsersFromFile that invites nobody.
 
@@ -193,7 +212,7 @@ def contract_invite_file(
     a notification, which names that address. The caller is the user that the OAuth client
     acts as, so the same client finds the notifications and dismisses them.
     """
-    del smtp_configured  # without SMTP the API accepts no upload and leaves no notification
+    del smtp_ready  # without SMTP the API accepts no upload and leaves no notification
     address = f"{_name('invite')}@invalid"
     # Fails here, before any upload, if this login cannot read its notifications.
     _invite_notifications(pipeshub_client, address)
@@ -260,7 +279,7 @@ def contract_blocked_user(
     user: dict[str, str] = {}
     try:
         user = _create_user(
-            users_client, "blocked", _DEMO_EMAIL_DOMAIN, password=f"Aa1!{uuid4().hex}"
+            users_client, "blocked", _DEMO_EMAIL_DOMAIN, password=_strong_password()
         )
         email = user["email"]
         for attempt in range(1, _WRONG_LOGINS_TO_BLOCK + 1):
@@ -270,6 +289,11 @@ def contract_blocked_user(
                 f"Start login {attempt} of the blocked user: "
                 f"HTTP {started.status_code} {started.text[:300]}"
             )
+            if "password" not in (started.json().get("allowedMethods") or []):
+                pytest.skip(
+                    "The organization does not allow a login with a password, so no login "
+                    "can be blocked with wrong passwords"
+                )
             refused = _paced(
                 lambda: user_account_client.authenticate(
                     session_token, email, f"wrong-{uuid4().hex}"
@@ -298,28 +322,36 @@ def contract_blocked_user(
 @pytest.fixture(scope="module")
 def contract_user_groups(
     user_groups_client: UserGroupsClient, contract_users: dict[str, dict[str, str]]
-) -> Iterator[dict[str, str]]:
+) -> Iterator[dict[str, Any]]:
     created: dict[str, str] = {}
+
+    def _group(role: str) -> str:
+        name = _name(role)
+        group = response_body(
+            user_groups_client.create_group(name), (201,), f"Create user group ({role})"
+        )
+        assert group.get("_id"), f"Create user group ({role}): response has no _id"
+        created[name] = str(group["_id"])
+        return created[name]
+
     try:
-        for role in GROUP_ROLES:
-            group = response_body(
-                user_groups_client.create_group(_name(role)), (201,), f"Create user group ({role})"
-            )
-            assert group.get("_id"), f"Create user group ({role}): response has no _id"
-            created[role] = str(group["_id"])
-        for group_role, user_role in (("readonly", "readonly"), ("leavable", "member")):
+        groups: dict[str, Any] = {role: _group(role) for role in GROUP_ROLES}
+        for pool in GROUP_POOLS:
+            groups[pool] = [_group(pool) for _ in range(_GROUP_POOL_SIZE)]
+        for user_role, group_ids in (
+            ("readonly", [groups["readonly"]]),
+            ("member", groups["leavable"]),
+        ):
             response_body(
-                user_groups_client.add_users(
-                    [contract_users[user_role]["id"]], [created[group_role]]
-                ),
+                user_groups_client.add_users([contract_users[user_role]["id"]], group_ids),
                 (200,),
-                f"Add the {user_role} user to the {group_role} group",
+                f"Add the {user_role} user to its groups",
             )
-        yield created
+        yield groups
     finally:
-        for role, group_id in created.items():
+        for name, group_id in created.items():
             delete_quietly(
-                f"user group ({role})",
+                f"user group {name}",
                 lambda group_id=group_id: user_groups_client.delete_group(group_id),
             )
 
@@ -342,10 +374,20 @@ def contract_teams(teams_client: TeamsClient) -> Iterator[dict[str, str]]:
 
 
 def _image(resp: requests.Response, what: str) -> tuple[bytes, str] | None:
-    """The image in a response and its type, or None if the API says there is none."""
+    """The image in a response and its type, or None if the API says there is none.
+
+    "None" is a 204 (logo) or a JSON object with `errorMessage` (display picture). Every
+    other 200 is an image: the API sends no type for one that it stored without a type.
+    """
     assert resp.status_code in (200, 204), f"{what}: HTTP {resp.status_code} {resp.text[:300]}"
     content_type = resp.headers.get("Content-Type", "").split(";")[0].strip()
-    return (resp.content, content_type) if content_type.startswith("image/") else None
+    if resp.status_code == 204:
+        return None
+    if content_type == "application/json":
+        body = resp.json()
+        if isinstance(body, dict) and "errorMessage" in body:
+            return None
+    return resp.content, content_type if content_type.startswith("image/") else "image/jpeg"
 
 
 def _keep_image(
@@ -469,15 +511,27 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         ),
         "Four users at example.com: to read, to update, to delete, and one that the group and "
         "team operations add and remove as a member. The one to read is marked as logged in, "
-        "so that the API sends it no invitation.",
+        "so that the API sends it no invitation. The API only marks a user as deleted: each "
+        "run leaves these four as deleted users, each with its node in the graph, a hidden "
+        "personal knowledge base and an edge to the All team.",
     ),
     ValueSource(
         "contract_new_names",
         ("user.new.email", "userGroup.new.name", "userGroup.renamed.name"),
         lambda names: (names["email"], names["group"], names["renamed"]),
-        "Names that nothing has yet, a different one in each request: the email for the users "
-        "that createUser creates, and the names for the groups that createUserGroup creates "
-        "and updateUserGroup renames. The fixture creates nothing.",
+        "Names that nothing has yet, a different one in each request: an address at "
+        "acme-demo.example for the users that createUser creates, and the names for the "
+        "groups that createUserGroup creates and updateUserGroup renames. The fixture creates "
+        "nothing. The run deletes what the test cases create (about 14 users and 3 groups); "
+        "they stay as deleted users and groups.",
+    ),
+    ValueSource(
+        "contract_new_password",
+        ("user.new.password",),
+        lambda password: (password,),
+        "A random password that passes the API's rule, for the users that createUser creates. "
+        "Those users can log in with it until the run deletes them.",
+        secret=True,
     ),
     ValueSource(
         "contract_image_file",
@@ -488,10 +542,19 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
     ),
     ValueSource(
         "contract_user_groups",
-        tuple(f"userGroup.{role}.id" for role in GROUP_ROLES),
-        lambda groups: tuple(groups[role] for role in GROUP_ROLES),
-        "Five custom user groups: to read (with the readonly user in it), to rename, to "
-        "delete, one to add the member user to, and one that has it, to remove it from.",
+        (
+            *(f"userGroup.{role}.id" for role in GROUP_ROLES),
+            *(f"userGroup.{pool}.ids" for pool in GROUP_POOLS),
+        ),
+        lambda groups: (
+            *(groups[role] for role in GROUP_ROLES),
+            *(groups[pool] for pool in GROUP_POOLS),
+        ),
+        f"{len(GROUP_ROLES) + len(GROUP_POOLS) * _GROUP_POOL_SIZE} custom user groups: to read "
+        "(with the readonly user in it), to rename, to delete, and two pools of "
+        f"{_GROUP_POOL_SIZE}: groups without the member user, to add it to, and groups with "
+        "it, to remove it from. Each request takes the next group of its pool. The API only "
+        "marks a group as deleted: each run leaves them as deleted groups.",
     ),
     ValueSource(
         "contract_teams",
@@ -530,13 +593,14 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         "creates nothing and puts the status back at the end.",
     ),
     ValueSource(
-        "smtp_configured",
-        ("smtp.configured",),
-        lambda _: ("configured",),
-        "Changes the deployment and is not undone: it writes the SMTP server of the test "
-        "environment (SMTP_HOST, SMTP_PORT) into the settings, and the API does not give the "
-        "old password back. Skipped without those two variables.",
-        added=False,
+        "smtp_ready",
+        ("smtp.ready",),
+        lambda which: (which,),
+        "SMTP settings on the deployment, for the routes that refuse a request without them. "
+        "Settings that the deployment has stay as they are. A deployment with none gets those "
+        "of the SMTP_* environment: that changes the deployment and is not undone. Skipped "
+        "when the deployment has none and the environment has none.",
+        added=True,
     ),
     ValueSource(
         "contract_invite_file",
@@ -558,7 +622,11 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         ("user.blocked.id",),
         lambda user_id: (user_id,),
         "A user at acme-demo.example with a password, whose login the fixture blocks with "
-        "five wrong passwords, for the unblock operation.",
+        "five wrong passwords, for the unblock operation. With SMTP settings, the API sends "
+        "one 'Suspicious Login Attempt' mail to that address; the domain is reserved, and a "
+        "real relay can bounce the mail to the sender address of the settings. The run "
+        "leaves the user as a deleted user, and its login records. Skipped when the "
+        "organization allows no login with a password.",
     ),
 )
 

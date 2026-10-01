@@ -10,6 +10,15 @@ name: user-management
 
 include_path_regex: "^/(users|userGroups|teams|org)(/|$)"
 
+# Three results depend on the deployment:
+# - An organization of the type `individual` gets 400 for bulkInviteUsers and
+#   bulkInviteUsersFromFile (accountTypeCheck.ts).
+# - updateUser with `role: admin` gets 400 when the organization already has
+#   5 admins (user-admin.service.ts).
+# - The API counts the requests of one client address for its rate limit
+#   (the limiter runs before the login is read). A browser on the same host
+#   uses up the same limit, and the run can then get a 429.
+
 # Roles keep the operations apart, in whatever order they run: `readonly` is
 # only read, `mutable` is updated and `disposable` is deleted by the DELETE
 # operation. `blocked` is a user whose login is blocked, for the unblock
@@ -58,8 +67,9 @@ path_parameters:
 
 values:
   query.groupIds: userGroup.readonly.id
-  # Only the creator of a team is accepted, and the fixture teams are created
-  # by the user the tests log in as. It is only read here.
+  # The API answers 400 for a user that the graph does not have (entity.py).
+  # The user the tests log in as is one it has, and it created the fixture
+  # teams, so the filter finds them. The user is only read here.
   query.created_by: user.self.id
   # A team member must be a user that the graph already has.
   body.userRoles[*].userId: user.teamMember.id
@@ -76,6 +86,12 @@ values_by_operation:
     # request would otherwise carry the example of the spec. The value is a
     # different one in each request.
     body.email: user.new.email
+    # The API takes a password only for an address at acme-demo.example, and
+    # only one with upper and lower case, a digit and a special character
+    # (users.controller.ts). The address above and this value are such a pair.
+    # Gap: the spec has only `minLength: 8` and no rule for the address, and
+    # the run does not show the 400 for another address or a weak password.
+    body.password: user.new.password
     # The API refuses to delete an admin, and the cleanup of `created_resources`
     # is one DELETE. So every user that a test case creates is a member.
     # Gap: the run does not show that the API accepts `role: admin`.
@@ -102,12 +118,15 @@ values_by_operation:
   # Gap: the run does not show an invitation.
   bulkInviteUsersFromFile:
     body.file: invite.path
+  # The API answers 400 to an add or a remove that changes nothing. Each
+  # request takes the next group of a pool: groups without the user for the
+  # add, groups with the user for the remove.
   addUsersToGroup:
     body.userIds[*]: user.member.id
-    body.groupIds[*]: userGroup.joinable.id
+    body.groupIds[*]: userGroup.joinable.ids
   removeUsersFromGroup:
     body.userIds[*]: user.member.id
-    body.groupIds[*]: userGroup.leavable.id
+    body.groupIds[*]: userGroup.leavable.ids
   # A group name must be new among the groups of the organization. The value
   # is a different one in each request.
   createUserGroup:
@@ -186,11 +205,13 @@ requires:
     - org.logo
   updateOnboardingStatus:
     - org.onboardingStatus
-  # Without SMTP the API answers 404 before it looks at the request.
+  # Without SMTP settings the API answers 404 before it looks at the request.
+  # The fixture behind the key leaves the settings of the deployment as they
+  # are, and skips these operations on a deployment that has none to give.
   bulkInviteUsers:
-    - smtp.configured
+    - smtp.ready
   bulkInviteUsersFromFile:
-    - smtp.configured
+    - smtp.ready
 
 # Resources that a successful test case creates; the test deletes them at the end.
 # `{id}` is the value at `id_pointer` in the response.
