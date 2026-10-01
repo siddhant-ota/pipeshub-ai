@@ -4,10 +4,10 @@
 (`connector.mutable.id`, `crawlConnector.paused.id`, `oauthConfig.readonly.id`, ...).
 
 No fixture enables a connector, so nothing here starts a sync. Most connectors
-are of the Web type, which needs no credential. The two Slack connectors hold
+are of the Web type, which needs no credential. The Slack connectors hold
 made-up credentials, which the API stores as given and uses only in a sync.
 Only the MinIO connector names a real source, the MinIO server of the
-integration stack; without that server its fixture is skipped.
+integration stack; without that server its fixture skips.
 """
 
 from __future__ import annotations
@@ -23,9 +23,7 @@ from uuid import uuid4
 import pytest
 
 from helper.clients.kb_client import KBClient
-from helper.contract.events import read_cases
 from helper.contract.pytest_support import delete_quietly, response_body, suite_fixtures
-from helper.contract.runner import run_files
 from helper.contract.sources import ValueSource
 from helper.contract.suite import load_suite
 from helper.http.protocol import HTTPClientProtocol
@@ -38,19 +36,19 @@ SUITE_PATH = Path(__file__).with_name("suite.yaml")
 # schedule is found by the type of its connector, an OAuth configuration by its connector type.
 _CONSTANTS = load_suite(SUITE_PATH).constants
 _WEB = _CONSTANTS["connector.type"]
-_OAUTH_TYPE = _CONSTANTS["oauthConfig.connectorType"]
+_SLACK = _CONSTANTS["oauthConfig.connectorType"]
 _MINIO = "MinIO"
 
 _CONNECTORS = "/api/v1/connectors"
-_OAUTH_CONFIGS = f"/api/v1/oauth/{_OAUTH_TYPE}"
+_OAUTH_CONFIGS = f"/api/v1/oauth/{_SLACK}"
 _CRAWLING = f"/api/v1/crawlingManager/{_WEB}"
 _CRAWL_SCHEDULES = "/api/v1/crawlingManager/schedule/all"
 _GOOGLE_WORKSPACE_OAUTH_CONFIG = (
     "/api/v1/configurationManager/connectors/googleWorkspaceOauthConfig"
 )
-# createConnectorInstance, as Schemathesis names it in the events of a run.
-_CREATE = "POST /connectors"
 _DELETING = "DELETING"
+# What a delete of a connector answers when one is already in progress.
+_GONE_OR_GOING = (404, 409)
 
 # `.invalid` never resolves (RFC 2606). A Web connector must reach its website before it can
 # be enabled, so one with this URL stays disabled and never syncs, whatever a test case sends.
@@ -59,9 +57,11 @@ _API_TOKEN = {"auth": {"apiToken": "contract-not-a-real-token"}}
 _OAUTH_CLIENT = {"clientId": "contract-client-id", "clientSecret": "contract-not-a-real-secret"}
 
 # One connector per role, so that an update or a delete under test cannot change what another
-# operation reads, in whatever order they run. `idle` takes the invalid requests of the
-# operations that start a sync.
+# operation reads, in whatever order they run. `idle` takes the invalid requests of resync.
 CONNECTOR_ROLES = ("readonly", "mutable", "disposable", "idle")
+_DISPOSABLE = "disposable"
+# `apiToken` is read; the toggle operation switches the agent use of `agentToggle` on and off.
+API_TOKEN_ROLES = ("apiToken", "agentToggle")
 # One connector per state of a crawl schedule: `scheduled` is read, `removable` loses its
 # schedule, `pausable` is paused, `paused` already is, to be resumed. `removedWithAll` keeps
 # its schedule until the operation that removes every schedule, which is sent last.
@@ -95,71 +95,80 @@ def _create_connector(
     return str(connector["connectorId"])
 
 
-def _delete_connectors(client: HTTPClientProtocol, connectors: dict[str, str]) -> None:
+def _delete_connectors(
+    client: HTTPClientProtocol, connectors: dict[str, str], maybe_in_deletion: tuple[str, ...] = ()
+) -> None:
+    """`maybe_in_deletion`: the roles that an operation under test may have deleted already.
+
+    The API deletes a connector in the background and answers 409 to a second delete until
+    it is gone.
+    """
     for role, connector_id in connectors.items():
         delete_quietly(
             f"connector ({role})",
             lambda connector_id=connector_id: client.request(
                 "DELETE", f"{_CONNECTORS}/{connector_id}"
             ),
+            also_fine=_GONE_OR_GOING if role in maybe_in_deletion else (404,),
         )
 
 
-def _web_connectors(client: HTTPClientProtocol) -> dict[str, dict[str, Any]]:
-    """Every Web connector that the client may see, by ID."""
-    found: dict[str, dict[str, Any]] = {}
+def _connectors_named(client: HTTPClientProtocol, prefix: str) -> dict[str, str]:
+    """ID -> name of every connector the client may see whose name starts with `prefix`
+    and that is not being deleted."""
+    found: dict[str, str] = {}
     for scope in ("team", "personal"):
         page = 1
         while True:
             body = response_body(
                 client.request(
-                    "GET",
-                    f"{_CONNECTORS}/",
-                    params={"scope": scope, "connectorType": _WEB, "page": page, "limit": 200},
+                    "GET", f"{_CONNECTORS}/", params={"scope": scope, "page": page, "limit": 200}
                 ),
                 (200,),
-                f"List the {_WEB} connectors ({scope})",
+                f"List the connectors ({scope})",
             )
             for connector in body.get("connectors") or []:
-                if connector.get("_key"):
-                    found[str(connector["_key"])] = connector
+                name = str(connector.get("name") or "")
+                if (
+                    connector.get("_key")
+                    and name.startswith(prefix)
+                    and connector.get("status") != _DELETING
+                ):
+                    found[str(connector["_key"])] = name
             if not (body.get("pagination") or {}).get("hasNext"):
                 break
             page += 1
     return found
 
 
-def _names_of_failed_creates() -> set[str]:
-    """The instance name in every create request of this run that was not answered with a 2xx."""
-    events = run_files(load_suite(SUITE_PATH)).events
-    names: set[str] = set()
-    if not events.exists():
-        return names
-    for case in read_cases(events):
-        if case.label != _CREATE or (case.status is not None and 200 <= case.status < 300):
-            continue
-        body = case.request_json()
-        name = body.get("instanceName") if isinstance(body, dict) else None
-        if isinstance(name, str) and name.strip():
-            names.add(name.strip())
-    return names
+def _create_oauth_connector(client: HTTPClientProtocol, role: str) -> str:
+    """A Slack connector that signs in with OAuth, created with the client of an OAuth app.
 
-
-def _create_oauth_config(client: HTTPClientProtocol, role: str) -> str:
-    what = f"Create {_OAUTH_TYPE} OAuth configuration ({role})"
-    resp = client.request(
-        "POST",
-        _OAUTH_CONFIGS,
-        json={
-            "oauthInstanceName": f"contract-{role}-{uuid4().hex[:8]}",
-            "config": _OAUTH_CLIENT,
-            # The gateway requires it; the API builds the redirect URI of the sign-in from it.
-            "baseUrl": client.base_url,
+    For an admin the API then also makes an OAuth configuration with that client
+    (create_connector_instance in router.py). It is the only way to one: the gateway
+    refuses every request to POST /oauth/{connectorType} (see `no_success_response`).
+    """
+    return _create_connector(
+        client,
+        role,
+        _SLACK,
+        # Slack connectors are personal only.
+        scope="personal",
+        authType="OAUTH",
+        baseUrl=client.base_url,
+        config={
+            "auth": {**_OAUTH_CLIENT, "oauthInstanceName": f"contract-{role}-{uuid4().hex[:8]}"}
         },
     )
-    config = response_body(resp, (200, 201), what).get("oauthConfig") or {}
-    assert config.get("_id"), f"{what}: response has no oauthConfig._id"
-    return str(config["_id"])
+
+
+def _oauth_config_id(client: HTTPClientProtocol, connector_id: str, role: str) -> str:
+    what = f"Read the configuration of the OAuth connector ({role})"
+    resp = client.request("GET", f"{_CONNECTORS}/{connector_id}/config")
+    config = response_body(resp, (200,), what).get("config") or {}
+    config_id = ((config.get("config") or {}).get("auth") or {}).get("oauthConfigId")
+    assert config_id, f"{what}: the API made no OAuth configuration for the connector"
+    return str(config_id)
 
 
 def _delete_oauth_configs(client: HTTPClientProtocol, configs: dict[str, str]) -> None:
@@ -171,43 +180,29 @@ def _delete_oauth_configs(client: HTTPClientProtocol, configs: dict[str, str]) -
 
 
 @pytest.fixture(scope="module")
-def contract_failed_creates(pipeshub_client: HTTPClientProtocol) -> Iterator[str]:
-    """Deletes, after the run, the connectors that a failed create left behind.
+def contract_case_names(pipeshub_client: HTTPClientProtocol) -> Iterator[str]:
+    """The name of what a test case creates or renames, and the cleanup that goes with it.
 
-    The connector service stores a new instance before it stores its configuration
-    (create_connector_instance in app/connectors/api/router.py). A configuration that it
-    cannot store, for example `config.auth` that is not an object, is answered with 500,
-    and the instance stays. That response has no ID, so `created_resources` cannot delete
-    it. Such a connector is new, is of the Web type, and has the name of a create request
-    of this run that was not answered with a 2xx.
-    """
-    client = pipeshub_client
-    before = set(_web_connectors(client))
-    try:
-        yield str(len(before))
-    finally:
-        left_behind: list[str] = []
-        try:
-            names = _names_of_failed_creates()
-            left_behind = [
-                connector_id
-                for connector_id, connector in _web_connectors(client).items()
-                if connector_id not in before
-                and connector.get("name") in names
-                and connector.get("status") != _DELETING
-            ]
-        except Exception as exc:  # noqa: BLE001 - logged and not raised, as in delete_quietly
-            logger.warning("Could not look for the connectors of failed creates: %s", exc)
-        _delete_connectors(client, {f"left by a failed create, {id_}": id_ for id_ in left_behind})
-
-
-@pytest.fixture(scope="module")
-def contract_unique_name() -> str:
-    """The name of what a test case creates or renames; the API refuses a name twice.
-
+    The API refuses a connector name that is in use, so every request gets its own:
     `{case}` becomes the number of the request (helper/contract/values.py).
+
+    After the run, this deletes every connector that still has a name of this run. The run
+    deletes what a create answered with a 2xx. But the connector service stores a new
+    instance before it stores its configuration (create_connector_instance in router.py):
+    a configuration that it cannot store, for example `config.auth` that is not an object,
+    is answered with 500, and the instance stays, with no ID in the response.
     """
-    return f"contract-case-{uuid4().hex[:8]}-{{case}}"
+    prefix = f"contract-case-{uuid4().hex[:8]}-"
+    try:
+        yield prefix + "{case}"
+    finally:
+        left_behind: dict[str, str] = {}
+        try:
+            left_behind = _connectors_named(pipeshub_client, prefix)
+        except Exception as exc:  # noqa: BLE001 - logged and not raised, as in delete_quietly
+            logger.warning("Could not look for the connectors that the run left behind: %s", exc)
+        by_name = {f"left by the run, {name}": id_ for id_, name in left_behind.items()}
+        _delete_connectors(pipeshub_client, by_name, maybe_in_deletion=tuple(by_name))
 
 
 @pytest.fixture(scope="module")
@@ -239,9 +234,11 @@ def contract_no_crawl_schedules_of_others(pipeshub_client: HTTPClientProtocol) -
     schedule of a real connector back. This looks before `contract_crawl_connectors` makes
     the schedules of the suite, so whatever the list has then belongs to someone else.
     """
-    schedules = response_body(
-        pipeshub_client.request("GET", _CRAWL_SCHEDULES), (200,), "List the crawl schedules"
-    ).get("data")
+    what = "List the crawl schedules"
+    schedules = response_body(pipeshub_client.request("GET", _CRAWL_SCHEDULES), (200,), what).get(
+        "data"
+    )
+    assert isinstance(schedules, list), f"{what}: `data` is not a list: {schedules!r}"
     if schedules:
         pytest.skip(
             f"The organization has {len(schedules)} crawl job(s) that this suite did not make. "
@@ -258,57 +255,50 @@ def contract_connectors(pipeshub_client: HTTPClientProtocol) -> Iterator[dict[st
             created[role] = _create_connector(pipeshub_client, role)
         yield created
     finally:
-        _delete_connectors(pipeshub_client, created)
+        _delete_connectors(pipeshub_client, created, maybe_in_deletion=(_DISPOSABLE,))
 
 
 @pytest.fixture(scope="module")
 def contract_session_connector(user_session_client: HTTPClientProtocol) -> Iterator[str]:
     created: dict[str, str] = {}
     try:
-        created["sessionOwned"] = _create_connector(user_session_client, "session-owned")
+        created["sessionOwned"] = _create_connector(
+            user_session_client, "session-owned", scope="personal"
+        )
         yield created["sessionOwned"]
     finally:
         _delete_connectors(user_session_client, created)
 
 
 @pytest.fixture(scope="module")
-def contract_api_token_connector(pipeshub_client: HTTPClientProtocol) -> Iterator[str]:
+def contract_api_token_connectors(pipeshub_client: HTTPClientProtocol) -> Iterator[dict[str, str]]:
     created: dict[str, str] = {}
     try:
-        # Slack connectors are personal only.
-        created["apiToken"] = _create_connector(
-            pipeshub_client,
-            "api-token",
-            _OAUTH_TYPE,
-            scope="personal",
-            authType="API_TOKEN",
-            config=_API_TOKEN,
-        )
-        yield created["apiToken"]
+        for role in API_TOKEN_ROLES:
+            created[role] = _create_connector(
+                pipeshub_client,
+                role,
+                _SLACK,
+                # Slack connectors are personal only.
+                scope="personal",
+                authType="API_TOKEN",
+                config=_API_TOKEN,
+            )
+        yield created
     finally:
         _delete_connectors(pipeshub_client, created)
 
 
 @pytest.fixture(scope="module")
 def contract_oauth_connector(pipeshub_client: HTTPClientProtocol) -> Iterator[str]:
-    """A connector that signs in with OAuth, linked to an OAuth configuration of its own.
-
-    The API builds the authorization URL from the stored client ID; it calls the third
-    party only when a sign-in comes back with a code.
-    """
+    """The API builds the authorization URL from the stored client ID; it calls the third
+    party only when a sign-in comes back with a code."""
     client = pipeshub_client
-    configs: dict[str, str] = {}
     connectors: dict[str, str] = {}
+    configs: dict[str, str] = {}
     try:
-        configs["connector"] = _create_oauth_config(client, "connector")
-        connectors["oauth"] = _create_connector(
-            client,
-            "oauth",
-            _OAUTH_TYPE,
-            scope="personal",
-            authType="OAUTH",
-            config={"auth": {"oauthConfigId": configs["connector"]}},
-        )
+        connectors["oauth"] = _create_oauth_connector(client, "oauth")
+        configs["oauth"] = _oauth_config_id(client, connectors["oauth"], "oauth")
         yield connectors["oauth"]
     finally:
         _delete_connectors(client, connectors)
@@ -322,6 +312,10 @@ def contract_minio_connector(pipeshub_client: HTTPClientProtocol) -> Iterator[st
     The options of a dynamic filter come from the source, so this is the one fixture that
     names a real one: the MinIO server of the integration stack, with the variables of the
     MinIO connector suite and its defaults for that stack.
+
+    The check below reaches the server from the test process, on its published port. The
+    connector service reaches it by its own address (`MINIO_CONNECTOR_ENDPOINT`), which
+    this process cannot check.
     """
     # Here and not at the top: the conftest of the MinIO suite imports the backend package,
     # which is on the path only under pytest (root conftest), and
@@ -350,7 +344,6 @@ def contract_minio_connector(pipeshub_client: HTTPClientProtocol) -> Iterator[st
             scope="personal",
             config={
                 "auth": {
-                    # As the connector service reaches it, inside the compose network.
                     "endpointUrl": os.getenv("MINIO_CONNECTOR_ENDPOINT", "http://minio:9000"),
                     "accessKey": access_key,
                     "secretKey": secret_key,
@@ -395,7 +388,9 @@ def contract_crawl_connectors(pipeshub_client: HTTPClientProtocol) -> Iterator[d
         yield created
     finally:
         # The schedule first: it lives in the job queue, and must not outlive a connector
-        # whose delete failed.
+        # whose delete failed. `schedulable` has the last schedule that a test case gave it;
+        # if that one comes due before this, the connector service skips the sync of a
+        # connector that is not enabled.
         for role, connector_id in created.items():
             delete_quietly(
                 f"crawl schedule ({role})",
@@ -408,13 +403,18 @@ def contract_crawl_connectors(pipeshub_client: HTTPClientProtocol) -> Iterator[d
 
 @pytest.fixture(scope="module")
 def contract_oauth_configs(user_session_client: HTTPClientProtocol) -> Iterator[dict[str, str]]:
-    created: dict[str, str] = {}
+    """One OAuth configuration per role, each made together with a connector of its own."""
+    client = user_session_client
+    connectors: dict[str, str] = {}
+    configs: dict[str, str] = {}
     try:
         for role in OAUTH_CONFIG_ROLES:
-            created[role] = _create_oauth_config(user_session_client, role)
-        yield created
+            connectors[role] = _create_oauth_connector(client, f"oauth-config-{role}")
+            configs[role] = _oauth_config_id(client, connectors[role], role)
+        yield configs
     finally:
-        _delete_oauth_configs(user_session_client, created)
+        _delete_connectors(client, connectors)
+        _delete_oauth_configs(client, configs)
 
 
 @pytest.fixture(scope="module")
@@ -473,63 +473,61 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
     # after them. So the run has deleted what its test cases created, and the other fixtures
     # their own connectors, before this one looks for what is left.
     ValueSource(
-        "contract_failed_creates",
-        ("webConnector.existing.count",),
-        lambda count: (count,),
-        "Creates nothing. It counts the Web connectors before the run, and after the run it "
-        "deletes the new Web connectors that have the name of a create request which the API "
-        "did not answer with a 2xx: the API can keep the connector of a create that it answers "
-        "with 500.",
-    ),
-    ValueSource(
-        "contract_unique_name",
+        "contract_case_names",
         ("testCase.uniqueName",),
         lambda name: (name,),
-        "Creates nothing. The name that the test cases give to the connectors and OAuth "
-        "configurations they create or rename: the API refuses a name that is in use, so the "
-        "name has eight random characters for this run and the number of the request.",
+        "Creates nothing. The name that the test cases give to the connectors they create or "
+        "rename: the API refuses a name that is in use, so the name has eight random "
+        "characters for this run and the number of the request. After the run it deletes "
+        "every connector that still has such a name: the API can keep the connector of a "
+        "create that it answers with 500.",
     ),
     ValueSource(
         "contract_no_google_workspace_credentials",
         ("googleWorkspace.oauthClient",),
         lambda state: (state,),
         "Creates nothing. It reads the Google Workspace OAuth configuration of the "
-        "organization and is skipped when there is one: the token exchange under test would "
-        "send every request to Google with it.",
+        "organization and skips when there is one: the token exchange under test would send "
+        "every request to Google with it.",
     ),
     _by_role(
         "contract_connectors",
         "connector",
         CONNECTOR_ROLES,
         "Four Web connectors of team scope that are not enabled: to read, to update, to delete, "
-        "and one that takes the invalid requests of toggle and resync. Their website is a "
-        "host name that does not exist, so none of them can be enabled or synced.",
+        "and one that takes the invalid requests of resync. Their website is a host name that "
+        "does not exist, so none of them can be enabled or synced.",
     ),
     _one_connector(
         "contract_session_connector",
         "sessionOwned",
-        "One more such Web connector, created with the session of the test user, for the "
-        "operation that accepts only that login.",
+        "One more such Web connector, of personal scope, created with the session of the test "
+        "user: the spec lists only that login for the operation that saves filters, so the run "
+        "uses it, and the connector belongs to the user of that login.",
     ),
-    _one_connector(
-        "contract_api_token_connector",
-        "apiToken",
-        "A personal Slack connector with a made-up API token, not enabled: the filter options "
-        "are answered only for a connector that has stored credentials.",
+    _by_role(
+        "contract_api_token_connectors",
+        "connector",
+        API_TOKEN_ROLES,
+        "Two personal Slack connectors with a made-up API token, not enabled. One is read: the "
+        "filter options are answered only for a connector that has stored credentials. On the "
+        "other the toggle operation switches the agent use on and off, which starts no sync.",
     ),
     _one_connector(
         "contract_oauth_connector",
         "oauth",
-        "A personal Slack connector that signs in with OAuth, not enabled, and the Slack OAuth "
-        "configuration it uses, with a made-up client ID and secret: the authorization URL is "
-        "built from them without a call to Slack.",
+        "A personal Slack connector that signs in with OAuth, not enabled, created with a "
+        "made-up client ID and secret, and the Slack OAuth configuration that the API makes "
+        "with them: the authorization URL is built from them without a call to Slack.",
     ),
     _one_connector(
         "contract_minio_connector",
         "dynamicFilter",
         "A personal MinIO connector for the MinIO server of the integration stack, not enabled: "
-        "the options of its `buckets` filter are read from that server. Skipped when the "
-        "server is not reachable.",
+        "the options of its `buckets` filter are read from that server. It skips when the "
+        "test process cannot reach the server on its published port; the connector service "
+        "reaches the server by another address (`http://minio:9000` in the stack), which the "
+        "fixture cannot check.",
     ),
     # Before the crawl connectors: it must see the schedules that exist without them.
     ValueSource(
@@ -537,9 +535,8 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         ("crawlSchedule.ofOthers.count",),
         lambda count: (count,),
         "Creates nothing. It lists the crawl schedules of the organization before the suite "
-        "makes its own, and is skipped when there is one: the operation that removes every "
-        "crawl schedule would remove it, and nothing puts the schedule of a real connector "
-        "back.",
+        "makes its own, and skips when there is one: the operation that removes every crawl "
+        "schedule would remove it, and nothing puts the schedule of a real connector back.",
     ),
     _by_role(
         "contract_crawl_connectors",
@@ -555,8 +552,10 @@ VALUE_SOURCES: tuple[ValueSource, ...] = (
         "contract_oauth_configs",
         "oauthConfig",
         OAUTH_CONFIG_ROLES,
-        "Three Slack OAuth configurations with a made-up client ID and secret, created with "
-        "the session of the test user: to read, to update, to delete.",
+        "Three Slack OAuth configurations with a made-up client ID and secret: to read, to "
+        "update, to delete. The gateway refuses to create one by itself, so each is made by "
+        "the API together with a personal Slack OAuth connector, with the session of the test "
+        "user; those three connectors are not enabled and are deleted with them.",
     ),
     _by_role(
         "contract_knowledge_bases",

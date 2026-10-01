@@ -17,11 +17,12 @@ include_path_regex: "^/(connectors|crawlingManager|oauth)(/|$)"
 #
 # Roles keep the operations apart, in whatever order they run: `readonly` is
 # only read, `mutable` is updated, `disposable` is deleted by the DELETE
-# operation. `idle` is never enabled; it takes the invalid requests of the
-# operations that start a sync. The other roles name the state an operation
-# needs: a connector of a type with a sign-in (`oauth`, `apiToken`), one that a
-# session of the test user created (`sessionOwned`), one whose source answers
-# (`dynamicFilter`), and one per state of a crawl schedule.
+# operation. `idle` is never enabled; it takes the invalid requests of resync.
+# The other roles name the state an operation needs: a connector of a type with
+# a sign-in (`oauth`, `apiToken`), one whose agent switch is toggled
+# (`agentToggle`), one that a session of the test user created
+# (`sessionOwned`), one whose source answers (`dynamicFilter`), and one per
+# state of a crawl schedule.
 path_parameters:
   defaults:
     - path_prefix: /connectors
@@ -53,7 +54,7 @@ path_parameters:
     updateConnectorFiltersSyncConfig:
       connectorId: connector.mutable.id
     toggleConnector:
-      connectorId: connector.idle.id
+      connectorId: connector.agentToggle.id
     resyncConnector:
       connectorId: connector.idle.id
     # A knowledge base is a connector instance too, and it is the only one that
@@ -70,6 +71,10 @@ path_parameters:
     getFilterFieldOptions:
       connectorId: connector.dynamicFilter.id
 
+    # The valid schedules that the API accepts for this connector are cron and
+    # interval schedules, and one can come due during the run. The job then
+    # publishes `web.resync`, and the connector service skips a sync of a
+    # connector that is not enabled (_handle_start_sync in event_service.py).
     scheduleCrawlingJob:
       connectorId: crawlConnector.schedulable.id
     removeCrawlingJob:
@@ -90,32 +95,57 @@ path_parameters:
 # operation that has it.
 values:
   query.nodeId: knowledgeBase.readonly.id
-  # Not IDs, but no valid create can succeed without them.
-  #
-  # A type of the registry: a made-up one is "not found" (create) or matches
-  # no instance (list). What the value hides: the spec allows any text as
-  # `connectorType`, and the API answers 404 for a type that the registry does
-  # not have (the spec documents 400 for it).
-  body.connectorType: connector.type
+  # Not an ID. A made-up type matches no instance, and the list would be empty.
   query.connectorType: connector.type
-  # The API refuses a connector name or an OAuth configuration name that is in
-  # use, and Schemathesis repeats its values. Every request gets a name of its
-  # own (`{case}` in the value). What the value hides: the valid names at the
-  # limits of the spec (1 and 100 characters) are not sent. The invalid ones
-  # still are.
+  # Not an ID, but the API refuses a connector name that is in use, and
+  # Schemathesis repeats its values. Every request gets a name of its own
+  # (`{case}` in the value). What the value hides: the valid names at the limits
+  # of the spec (1 and 100 characters) are not sent. The invalid ones still are.
   body.instanceName: testCase.uniqueName
-  body.oauthInstanceName: testCase.uniqueName
+  # handleOAuthCallback. Made-up text: the connector service cannot decode the
+  # state, and answers before it would send the code to a third party
+  # (handle_oauth_callback in router.py). A real state would do that.
+  query.code: oauthCallback.code
+  query.state: oauthCallback.state
+
+# The same for one operation; it wins over `values`.
+values_by_operation:
+  # Not IDs, but no valid create can succeed without them. A connector type
+  # accepts only its own sign-in methods and scopes, and answers 400 for the
+  # others. The fixture type, Web, has no sign-in (`NONE`, which the enum of the
+  # spec does not have), so every request with an `authType` would be refused
+  # for that field, also the invalid ones, before the field under test counts.
+  # Zammad signs in with an API token and is created without a call to its
+  # server. It has team scope only.
+  # What the values hide: a type that the registry does not have is answered
+  # 404 (the spec documents 400 for it); the other four values of `authType`
+  # and `scope: personal` are not sent in a valid request.
+  createConnectorInstance:
+    body.connectorType: connector.createType
+    body.authType: connector.createAuthType
+    body.scope: connector.createScope
+  # A valid `type: sync` enables the connector and starts a sync of it; a valid
+  # `type: agent` only switches the agent use on or off (toggle_connector_instance
+  # in router.py). What the value hides: a valid `type: sync` is not sent.
+  toggleConnector:
+    body.type: connector.toggleType
 
 # Values that the suite file gives itself.
 constants:
   # The connector type that needs no credential: an instance is created and
   # configured without a call to the website it names.
   connector.type: Web
-  # A connector type with an OAuth sign-in, for the OAuth configurations and for
-  # the two connectors that need a sign-in method.
+  connector.createType: Zammad
+  connector.createAuthType: API_TOKEN
+  connector.createScope: team
+  connector.toggleType: agent
+  # A connector type with an OAuth sign-in and an API-token sign-in, for the
+  # OAuth configurations and for the connectors that need a sign-in method.
   oauthConfig.connectorType: Slack
   # The filter of the MinIO connector whose options come from the source.
   connector.dynamicFilter.key: buckets
+  oauthCallback.code: contract-not-a-real-code
+  oauthCallback.state: contract-not-a-real-state
 
 # ID fields whose value the client is free to choose. They keep the generated
 # value, and a request with one is judged like any other.
@@ -129,39 +159,37 @@ client_chosen_ids:
   - field: body.oauthConfigId
     reason: The gateway does not forward this field to the connector service (createConnectorInstance in connector.controllers.ts), so its value has no effect.
   - field: body.config.auth.oauthConfigId
-    reason: The test cases create Web connectors, which have no sign-in; the connector service stores the field for them without a lookup.
+    reason: The test cases create connectors that sign in with an API token; the connector service stores the field for them without a lookup.
   - field: body.auth.oauthConfigId
     reason: The mutable fixture is a Web connector, which has no sign-in; the connector service stores the field for it without a lookup.
   - field: query.identifiers[*]
     reason: Any string is a valid identifier. One that matches no record is answered with 200 and comes back in `not_found_identifiers`.
 
-# ID fields that must name something that exists, and for which no fixture
-# gives a value. They keep the generated value, so a valid request with one
-# names nothing real. If the API rejects it, that is not counted as a
-# difference; the report says how many such requests there were.
-ids_without_fixture:
-  - field: query.state
-    reason: Issued by GET /connectors/{connectorId}/oauth/authorize for one sign-in at the third party. A request with a real state and a made-up code would send that code to the third party.
-
 # Only invalid requests are sent. The gateway rejects them in its validator
 # (connectors.routes.ts) before the connector service is called. The idle
-# connector is a second safeguard: its website does not exist, so it cannot be
-# enabled, and a sync or a resync of a connector that is not enabled is refused.
-# The success response of these operations is not checked.
+# connector is a second safeguard: it is not enabled, and a resync of a
+# connector that is not enabled is refused.
+# The success response of this operation is not checked.
 negative_only:
-  - reason: A valid request starts a sync of the connector (it reads its source, and the records are indexed with the embedding model and the LLM). The connector is locked while the sync runs, so the answers to the requests after the first would depend on timing.
+  - reason: A valid request is answered 400 for a connector that is not enabled. For an enabled one it starts a sync (the connector reads its source, and the records are indexed with the embedding model and the LLM) and locks the connector while the sync runs, so the answers to the requests after the first would depend on timing.
     operations:
-      - toggleConnector
       - resyncConnector
 
 # Operations that are sent, and for which no request can get a 2xx or a 3xx.
 no_success_response:
-  - operation: handleOAuthCallback
-    reason: The gateway wants a login for this route (connectors.routes.ts) and the spec says it needs none (`security` is empty), so the requests carry no token and every one is answered 401. With a login the gateway would answer 200 with `redirectUrl`, which is not the documented 302 either.
   - operation: getTokenFromCode
     reason: A success needs the authorization code that Google issues for one consent; nothing can generate it.
+  - operation: createOAuthConfig
+    reason: &base_url_dropped The controller of the gateway answers 400 unless the body has `baseUrl` (oauth.controllers.ts), and the validator of the route removes that field from the body before, because its schema does not have it (oauth.routes.ts, validation.middleware.ts). So the gateway refuses every request, whatever it carries.
   - operation: updateOAuthConfig
-    reason: The gateway answers 400 unless the body has `baseUrl` (updateOAuthConfig in oauth.controllers.ts). The spec has no such field, and a value of the suite can only replace a field that the spec has, so no request can have it.
+    reason: *base_url_dropped
+
+# How an operation logs in, where the default from the spec cannot work.
+auth:
+  # The spec says the callback needs no login (`security` is empty). The gateway
+  # wants one and the scope `connector:write` (connectors.routes.ts): without a
+  # token it answers 401 to everything, and the run could show nothing else.
+  handleOAuthCallback: oauth_client
 
 # Resources that a successful test case creates; the test deletes them at the end.
 # `{id}` is the value at `id_pointer` in the response; other `{...}` are value keys.
@@ -169,25 +197,21 @@ created_resources:
   - operation: createConnectorInstance
     id_pointer: /connector/connectorId
     delete_path: /connectors/{id}
+  # No request succeeds today (see no_success_response); this is for the day one does.
   - operation: createOAuthConfig
     id_pointer: /oauthConfig/_id
     delete_path: /oauth/{oauthConfig.connectorType}/{id}
 
 # Value keys an operation needs that go into no request.
 requires:
-  # A create that the API answers with 500 can leave its connector behind, and
-  # that response has no ID for `created_resources`. The fixture behind this key
-  # deletes those connectors after the run.
-  createConnectorInstance:
-    - webConnector.existing.count
   # The route has no validator: it sends the code of every request, valid or
   # not, to Google with the Google Workspace OAuth client of the organization.
   # Without such a client it answers 404 before that. The fixture behind this
-  # key is skipped when the organization has one, so the operation is sent only
+  # key skips when the organization has one, so the operation is sent only
   # where it calls nobody.
   getTokenFromCode:
     - googleWorkspace.oauthClient
-  # See `last`. The first key is from a fixture that is skipped when the
+  # See `last`. The first key is from a fixture that skips when the
   # organization has crawl schedules that the suite did not make. The second is
   # the connector whose schedule is still there for this operation to remove.
   removeAllCrawlingJob:
@@ -204,3 +228,7 @@ requires:
 # suite are the only ones: see `requires`.
 last:
   - removeAllCrawlingJob
+
+skip:
+  - operation: getAllScheduledConnectorInstancesInternal
+    reason: The gateway does not serve this route. It exists only in the Python connector service (router.py), where it wants a scoped service token that no login of the run has. What the gateway answers depends on how it was built; with the web app in it, the page of the web app with 200, without it an error. So no entry in this file would hold on every deployment, and no request can reach the operation.
