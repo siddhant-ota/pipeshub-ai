@@ -9,6 +9,10 @@ dependencies = [
   "pytest-order>=1.1.0",
   "pytest-timeout>=2.2.0",
   "pytest-xdist>=3.5.0",
+  # Contract tests (response-validation/**/contract): Schemathesis generates the
+  # requests from the OpenAPI spec; tomli-w writes its per-run config.
+  "schemathesis==4.28.0",
+  "tomli-w>=1.0.0",
   "filelock>=3.13.0",
   "aioboto3>=12.0.0",
   "aiohttp==3.14.3",
