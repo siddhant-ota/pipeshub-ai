@@ -1,12 +1,18 @@
 # Contract-test suite: enterprise search (conversations, semantic search, agents).
 # Routes: backend/nodejs/apps/src/modules/enterprise_search/routes/es.routes.ts
+# The keys on the right-hand side (`conversation.mutable.id`, ...) are produced
+# by `contract_values` in conftest.py.
 
 name: enterprise-search
 
 include_path_regex: "^/(conversations|search|agents)(/|$)"
 
-# Fixture key for each path parameter. `operations` wins over `defaults`;
-# in `defaults` the first matching path prefix wins.
+# Value for each path parameter. `operations` wins over `defaults`; in
+# `defaults` the first matching path prefix wins.
+#
+# Roles keep the operations apart: `readonly` is only read, `mutable` is
+# updated, `archivable` is archived and unarchived, and `disposable` is deleted
+# by the DELETE operation under test.
 path_parameters:
   defaults:
     - path_prefix: /agents
@@ -52,8 +58,46 @@ path_parameters:
     deleteAgentConversationById:
       conversationId: agentConversation.disposable.id
 
+# Query and body fields that get a real value wherever a request has them.
+# Every field that holds an ID must be here or in `waived_id_fields`; loading
+# the suite fails otherwise. A field applies to each operation that has it.
+values:
+  query.conversationId: conversation.readonly.id
+  query.projectId: project.id
+  body.projectId: project.id
+  body.userIds[*]: user.second.id
+  body.filters.kb[*]: knowledgeBase.id
+  body.filters.apps[*]: knowledgeBase.id
+  body.recordIds[*]: knowledgeBase.recordId
+  body.modelKey: llm.modelKey
+  # An agent model is a (modelKey, modelName, provider) triple; a real key with
+  # a random name or provider is still not a model that exists.
+  body.models[*].modelKey: llm.modelKey
+  body.models[*].modelName: llm.modelName
+  body.models[*].provider: llm.provider
+  body.knowledge[*].connectorId: knowledgeBase.id
+  body.knowledge[*].filters.records[*]: knowledgeBase.recordId
+
+# ID fields that keep the value Schemathesis generates.
+waived_id_fields:
+  - field: body.runId
+    reason: The client chooses the run ID; it names no existing resource.
+  - field: body.attachments[*].recordId
+    reason: Needs an uploaded chat attachment. The upload operations are skipped.
+  - field: body.attachments[*].virtualRecordId
+    reason: Needs an uploaded chat attachment. The upload operations are skipped.
+  - field: body.tools[*]
+    reason: Needs a configured toolset instance, which the fixtures do not create.
+  - field: body.toolsets[*].instanceId
+    reason: Needs a configured toolset instance, which the fixtures do not create.
+  - field: body.webSearch.providerKey
+    reason: Needs a configured web search provider, which the fixtures do not create.
+  - field: body.knowledge[*].filters.recordGroups[*]
+    reason: A knowledge base is addressed as an app (connectorId); there is no record-group fixture.
+
 # Only invalid requests are sent. The backend must reject them before it
 # reaches the LLM, so these runs cost nothing and still check validation.
+# The success response of these operations is not checked.
 negative_only:
   reason: A valid request calls the LLM.
   operations:
@@ -68,8 +112,8 @@ negative_only:
     - streamAgentConversationMessage
     - regenerateAgentConversationMessage
 
-# Resources that a successful test case creates. `cleanup` deletes them.
-# `{id}` is the value at `id_pointer` in the response; other `{...}` are fixture keys.
+# Resources that a successful test case creates; the test deletes them at the end.
+# `{id}` is the value at `id_pointer` in the response; other `{...}` are value keys.
 created_resources:
   - operation: createAgent
     id_pointer: /agent/_key

@@ -1,0 +1,49 @@
+# Base Schemathesis settings for the contract tests.
+# config.py adds the hooks path and one [[operations]] block per operation
+# (path parameter values, negative-only, disabled) and writes the config of the
+# run to integration-tests/reports/contract/<suite>/schemathesis.toml.
+
+seed = 42
+request-timeout = 60
+
+# The Node API allows 1,000 requests per minute (MAX_REQUESTS_PER_MINUTE).
+rate-limit = "600/m"
+
+# A run must not depend on what an earlier run left in .schemathesis/.
+[cache]
+enabled = false
+
+[generation]
+mode = "all"
+with-security-parameters = false
+# No replay of examples that an earlier run saved in .hypothesis/.
+database = "none"
+
+# examples + coverage are deterministic: two runs send the same test cases, so
+# a finding has a stable identity and the baseline can name it.
+[phases.examples]
+enabled = true
+
+[phases.coverage]
+enabled = true
+# By default this phase also sends methods the spec does not list for a path
+# (for example DELETE on a GET-only path). With real IDs such a request can
+# reach a route that exists but is not documented, and change or delete data.
+unexpected-methods = []
+
+[phases.fuzzing]
+enabled = false
+
+[phases.stateful]
+enabled = false
+
+# Only checks that compare the API with the spec. `not_a_server_error` is off:
+# a 5xx is a contract failure only when the spec does not document it, and
+# `status_code_conformance` reports exactly that.
+[checks]
+enabled = false
+status_code_conformance.enabled = true
+content_type_conformance.enabled = true
+response_schema_conformance.enabled = true
+positive_data_acceptance.enabled = true
+negative_data_rejection.enabled = true

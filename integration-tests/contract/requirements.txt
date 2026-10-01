@@ -1,5 +1,0 @@
-schemathesis==4.28.0
-requests>=2.32
-PyYAML>=6.0
-python-dotenv>=1.0
-tomli-w>=1.0

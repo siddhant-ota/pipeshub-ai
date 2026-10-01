@@ -1,4 +1,4 @@
-"""A stand-in API for `plan`: it answers every request, so Schemathesis can generate
+"""A stand-in API for `runner.plan`: it answers every request, so Schemathesis can generate
 its test cases without a PipesHub deployment. Nothing it returns is checked."""
 
 from __future__ import annotations

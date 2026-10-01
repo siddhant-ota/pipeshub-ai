@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 API_PREFIX = "/api/v1"
+NEGATIVE = "negative"
 
 
 @dataclass(frozen=True)
@@ -28,8 +29,12 @@ class Case:
     label: str
     phase: str
     mode: str
+    # Where the case differs from a plain valid request: `query`, `body`, ... or "".
     location: str
+    # Query: the parameter name. Body: the media type.
     parameter: str
+    # Body: where in the schema the case acts, as a JSON Schema pointer.
+    schema_pointer: str
     scenario: str
     description: str
     method: str
@@ -38,6 +43,10 @@ class Case:
     checks: tuple[Check, ...]
     request_base64: str = ""
     response_base64: str = ""
+
+    @property
+    def is_negative(self) -> bool:
+        return self.mode == NEGATIVE
 
     @property
     def request_body(self) -> str:
@@ -55,18 +64,14 @@ class Case:
     @property
     def what(self) -> str:
         """One line that says what this case sends."""
-        description = self.description
-        prefix = f"{self.parameter}: "
-        if self.parameter and description.startswith(prefix):
-            description = description[len(prefix) :]
+        description = self.description.removeprefix(f"{self.parameter}: ") if self.parameter else self.description
         where = " ".join(part for part in (self.location, self.parameter) if part)
         return f"{where}: {description}" if where else description
 
 
 def _target(uri: str) -> str:
     parts = urlsplit(uri)
-    path = parts.path
-    path = path.removeprefix(API_PREFIX)
+    path = parts.path.removeprefix(API_PREFIX)
     return f"{path}?{parts.query}" if parts.query else path
 
 
@@ -113,6 +118,7 @@ def read_cases(ndjson_path: Path) -> Iterator[Case]:
                     mode=(meta.get("generation") or {}).get("mode") or "",
                     location=data.get("parameter_location") or "",
                     parameter=data.get("parameter") or "",
+                    schema_pointer=data.get("location") or "",
                     scenario=data.get("scenario") or "",
                     description=data.get("description") or "",
                     method=value.get("method", ""),
