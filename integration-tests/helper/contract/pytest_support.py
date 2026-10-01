@@ -4,7 +4,7 @@ In the suite's `conftest.py`, after its fixtures and `VALUE_SOURCES`:
 
     contract_values, contract_run = suite_fixtures(SUITE_PATH, VALUE_SOURCES)
 
-In its test module:
+In its test module, `integration_test_<suite>_contract.py`:
 
     SUITE = load_suite(SUITE_PATH)
     pytestmark = CONTRACT_MARKS
@@ -51,7 +51,9 @@ from helper.contract.values import ContractValues
 
 logger = logging.getLogger("contract")
 
-TEST_MODULE_NAME = "integration_test_contract.py"
+# pytest imports a test module by its base name, so each suite names its module after itself:
+# integration_test_<suite>_contract.py.
+TEST_MODULE_GLOB = "integration_test_*_contract.py"
 # The fixture that gives each login its client, for deleting what the test cases created.
 _CLIENT_FIXTURES = {AUTH_OAUTH_CLIENT: "pipeshub_client", AUTH_SESSION: "user_session_client"}
 
@@ -135,10 +137,12 @@ def collect_values(
     return collected
 
 
-def _selected_operations(session: pytest.Session, test_path: Path) -> set[str]:
+def _selected_operations(session: pytest.Session, suite_directory: Path) -> set[str]:
     """The operations whose tests this session runs, so that selecting tests limits what is sent."""
     callspecs = (
-        getattr(item, "callspec", None) for item in session.items if item.path == test_path
+        getattr(item, "callspec", None)
+        for item in session.items
+        if item.path.parent == suite_directory
     )
     return {callspec.params["operation_id"] for callspec in callspecs if callspec is not None}
 
@@ -165,7 +169,6 @@ def _delete_leftovers(request: pytest.FixtureRequest, suite: Suite, values: Cont
 
 def suite_fixtures(suite_path: Path, sources: tuple[ValueSource, ...]) -> tuple[Any, Any]:
     """The `contract_values` and `contract_run` fixtures of the suite at `suite_path`."""
-    test_path = suite_path.with_name(TEST_MODULE_NAME)
 
     @pytest.fixture(scope="session", name="contract_values")
     def contract_values(request: pytest.FixtureRequest) -> ContractValues:
@@ -183,7 +186,7 @@ def suite_fixtures(suite_path: Path, sources: tuple[ValueSource, ...]) -> tuple[
                 contract_values,
                 base_url=pipeshub_client.base_url,
                 baseline_path=suite_path.with_name(BASELINE_NAME),
-                selected=_selected_operations(request.session, test_path),
+                selected=_selected_operations(request.session, suite_path.parent),
                 fixtures=fixture_rows(suite, sources),
             )
         finally:
@@ -199,10 +202,11 @@ def _suites_that_ran(terminalreporter: Any) -> list[Path]:
         (root / report.fspath).parent
         for reports in terminalreporter.stats.values()
         for report in reports
-        if getattr(report, "when", "") == "call"
-        and Path(getattr(report, "fspath", "") or "").name == TEST_MODULE_NAME
+        if getattr(report, "when", "") == "call" and getattr(report, "fspath", "")
     }
-    return sorted(directory / SUITE_NAME for directory in directories)
+    return sorted(
+        directory / SUITE_NAME for directory in directories if (directory / SUITE_NAME).exists()
+    )
 
 
 def terminal_summary(terminalreporter: Any) -> None:

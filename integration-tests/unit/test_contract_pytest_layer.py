@@ -29,7 +29,7 @@ CONTRACT_DIR = INTEGRATION_TESTS / "response-validation/enterprise-search/contra
 MATCHES = "PATCH /conversations/{conversationId}/archive"
 DIFFERS = "GET /search/{searchId}"
 SKIPPED = "DELETE /search"
-TEST_MODULE = "contract/integration_test_contract.py"
+TEST_MODULE = "contract/integration_test_enterprise_search_contract.py"
 
 ROOT_CONFTEST = """
 import tomllib

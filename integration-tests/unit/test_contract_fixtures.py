@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from helper.contract.baseline import load_baseline
-from helper.contract.pytest_support import TEST_MODULE_NAME
+from helper.contract.pytest_support import TEST_MODULE_GLOB
 from helper.contract.runner import BASELINE_NAME, SUITES_ROOT, suite_paths
 from helper.contract.sources import fixture_rows, load_value_sources
 from helper.contract.suite import load_suite
@@ -61,5 +61,10 @@ def test_the_baseline_names_only_operations_of_its_suite(suite_path: Path) -> No
 
 @pytest.mark.parametrize("suite_path", SUITES, ids=_suite_id)
 def test_every_suite_has_its_test_module(suite_path: Path) -> None:
-    assert suite_path.with_name(TEST_MODULE_NAME).exists()
+    """Named after the suite: pytest cannot import two test modules with one base name."""
+    name = load_suite(suite_path).name.replace("-", "_")
+
+    assert [path.name for path in suite_path.parent.glob(TEST_MODULE_GLOB)] == [
+        f"integration_test_{name}_contract.py"
+    ]
     assert suite_path.with_name(BASELINE_NAME).exists()

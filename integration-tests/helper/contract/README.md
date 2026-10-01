@@ -36,7 +36,7 @@ cd integration-tests
 pytest -m contract                                       # every suite
 pytest -m contract response-validation/enterprise-search # one suite
 pytest -m contract --collect-only -q                     # list the tests; sends nothing
-pytest "response-validation/enterprise-search/contract/integration_test_contract.py::test_spec_matches_api[GET /search]"
+pytest "response-validation/enterprise-search/contract/integration_test_enterprise_search_contract.py::test_spec_matches_api[GET /search]"
 ```
 
 **Use a deployment that holds no data anyone needs.** The run creates, changes
@@ -271,8 +271,9 @@ Files of a run, in `reports/contract/<suite>/run/`: `report.md`, `report.json`,
 ## Adding a suite
 
 1. Create `response-validation/<module>/contract/` with a `suite.yaml`, an empty
-   `baseline.json`, a `conftest.py` and `integration_test_contract.py`; copy them from
-   `enterprise-search`. The folder must be named `contract`.
+   `baseline.json`, a `conftest.py` and `integration_test_<suite>_contract.py`; copy them
+   from `enterprise-search`. The folder must be named `contract`, and the test module after
+   the suite: pytest cannot import two test modules with the same file name.
 2. Run `python -m helper.contract plan <suite.yaml>`. It tells you which path
    parameters, ID fields and logins the suite has not decided on yet.
 3. Write the fixtures in the suite's `conftest.py`, list them in `VALUE_SOURCES`, and end
